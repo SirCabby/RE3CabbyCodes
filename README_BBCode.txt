@@ -37,14 +37,6 @@ To uninstall: delete steam_api64.dll and rename steam_api64_orig.dll back.
 
 If steam_api64_orig.dll is missing or is not the game's own, or the game is another version (such as the dx11_non-rt beta), the mod says what is wrong - in a message box as the game starts, or in the panel (F7). For anything else, attach [b]RE3CabbyCodes.log[/b] and [b]RE3CabbyCodes.prev.log[/b] from the game's folder.
 
-[size=5][b]Please read before using[/b][/size]
-[list]
-[*][b]This is a first version - back up your saves first[/b]: Steam/userdata/<your id>/952060/remote/win64_save/.
-[*]The records panel changes your system save at once, and the save files' Delete and Copy change your saves (and Steam Cloud) at once - those cannot be undone.
-[*]The cheats change what the results screen ranks you on (clear time, saves) and the records it awards, and a save made while cheating records the game as it was.
-[*]One hit kills can cut short a boss fight that is scripted around the boss's health.
-[*]Inventory and item box changes are made only while the pause menu is up, and are kept by your next save.
-[/list]
 
 [size=5][b]Config[/b][/size]
 
