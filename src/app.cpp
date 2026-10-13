@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "crash.h"
 #include "dispatch.h"
 #include "log.h"
 #include "mem.h"
@@ -52,6 +53,9 @@ struct Hook {
   volatile LONG threads[kThreads] = {};
   int rate_logs = 0;
   bool moved_logged = false;
+  bool foreign_logged = false;   // the entry held another tool's function
+  bool not_code_logged = false;  // the entry held something that is not code
+  bool taken_logged = false;     // another tool took the entry over after the mod
 };
 
 void hk_update_behavior(void* arg);
@@ -110,6 +114,22 @@ bool name_is(uintptr_t entry, const char* want) {
   const uintptr_t name = mem::read_ptr(entry + L.name_off);
   const size_t len = std::strlen(want) + 1;
   return name && mem::readable(name, len) && std::memcmp(reinterpret_cast<const char*>(name), want, len) == 0;
+}
+
+// Code, committed and executable - for an entry's function that is not the
+// game's own (another tool's hook): a pointer that is not code is never called.
+bool executable(uintptr_t a) {
+  constexpr DWORD kExecute = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+  MEMORY_BASIC_INFORMATION mbi{};
+  return mem::plausible(a) && VirtualQuery(reinterpret_cast<void*>(a), &mbi, sizeof(mbi)) && mbi.State == MEM_COMMIT &&
+         (mbi.Protect & kExecute) && !(mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS));
+}
+
+// An entry's function for the log: the game's as exe+offset, another's by its
+// module (a stub in memory of its own has none).
+void describe_function(uintptr_t code, char* out, unsigned n) {
+  if (g_text.contains(code)) std::snprintf(out, n, "exe+0x%llX", static_cast<unsigned long long>(code - exe_base()));
+  else describe_address(reinterpret_cast<const void*>(code), out, n);
 }
 
 }  // namespace
@@ -232,9 +252,27 @@ bool hook() {
       const uintptr_t entry = entry_at(app, i);
       if (!name_is(entry, h.name)) continue;
       const uintptr_t code = mem::read_ptr(entry + L.func_off);
+      char where[MAX_PATH + 32];
+      describe_function(code, where, sizeof(where));
+      // Another tool's function there: REFramework puts a stub of its own into
+      // every entry once the game's first frame is out (its mods' start), keeping
+      // what was there to call on to. The mod hooks before that frame, so it is
+      // normally the one REFramework calls on to (check()); should REFramework get
+      // there first, the mod goes in front of it and calls on to its stub - which
+      // calls the game's function by the entry's name, never the entry again.
+      // Something that is not code at all is never called.
       if (!g_text.contains(code)) {
-        logf("app: %s's function %p is not the game's code - not hooked", h.name, reinterpret_cast<void*>(code));
-        break;
+        if (!executable(code)) {
+          if (!h.not_code_logged)
+            logf("app: %s's function %p is not code - not hooked", h.name, reinterpret_cast<void*>(code));
+          h.not_code_logged = true;
+          break;
+        }
+        if (!h.foreign_logged)
+          logf("app: %s's entry already holds another tool's function (%s), not the game's - REFramework hooks every "
+               "entry this way; the mod goes in front of it and calls on to it",
+               h.name, where);
+        h.foreign_logged = true;
       }
       h.original = reinterpret_cast<EntryFn>(code);  // before the store: the game may call it at once
       if (!mem::store<uintptr_t>(entry + L.func_off, reinterpret_cast<uintptr_t>(h.replacement))) {
@@ -242,9 +280,8 @@ bool hook() {
         break;
       }
       h.entry = entry;
-      logf("app: %s (entry %u of %u, group %u, priority %u, function exe+0x%llX) now ticks the mod first", h.name, i,
-           count, mem::read<uint16_t>(entry + L.group_off), mem::read<uint16_t>(entry + L.prio_off),
-           static_cast<unsigned long long>(code - exe_base()));
+      logf("app: %s (entry %u of %u, group %u, priority %u, function %s) now ticks the mod first", h.name, i, count,
+           mem::read<uint16_t>(entry + L.group_off), mem::read<uint16_t>(entry + L.prio_off), where);
       ++done;
       break;
     }
@@ -276,6 +313,24 @@ void check() {
         mem::store<uintptr_t>(entry + L.func_off, reinterpret_cast<uintptr_t>(h.original));
         logf("ERROR: app: another entry held %s's hook - put its function back", h.name);
       }
+    }
+    // Not moved: the entry is where it was with another function in it - another
+    // tool hooked it after the mod. REFramework does, to every entry, once the
+    // game's first frame is out, and calls on to what it replaced: the mod's
+    // function, so the tick comes through it. (If the game ever stops calling
+    // the mod, the panel says so.) Nothing is put back - that would take
+    // REFramework's hook out, or run the mod twice a frame.
+    if (!found && name_is(h.entry, h.name)) {
+      if (!h.taken_logged) {
+        h.taken_logged = true;
+        char who[MAX_PATH + 32];
+        describe_function(mem::read_ptr(h.entry + L.func_off), who, sizeof(who));
+        logf("app: another tool put its own function (%s) into %s's entry after the mod - it calls on to the mod's "
+             "(REFramework does), so the tick comes through it",
+             who, h.name);
+      }
+      h.entry = 0;
+      continue;
     }
     if (!h.moved_logged) {
       h.moved_logged = true;

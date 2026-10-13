@@ -8,8 +8,10 @@
 // may change. Every other line - comments, the other keys, a value's trailing
 // comment, the line endings (the defaults are written in text mode: CRLF) - is
 // kept byte for byte; a key set twice has both lines changed (load reads the
-// last); a switch no line sets is added at the end; and a file gone since the
-// start comes back as the defaults with the switches in.
+// last); a switch no line sets is added at the end; a file another program holds
+// for a moment (on Windows, a virus scanner) is written once it lets go, one held
+// for longer is left as it was; and a file gone since the start comes back as the
+// defaults with the switches in.
 #include <windows.h>
 
 #include <cstdio>
@@ -43,6 +45,30 @@ void write_file(const std::string& path, const std::string& text) {
     std::fwrite(text.data(), 1, text.size(), f);
     std::fclose(f);
   }
+}
+
+// The ini held open by another program for a while, the way a virus scanner
+// holds a file it scans: read, sharing read only (no delete - the replace is
+// refused meanwhile, "access denied").
+struct Hold {
+  std::string path;
+  DWORD ms;
+};
+DWORD WINAPI hold(LPVOID p) {
+  const auto* h = static_cast<const Hold*>(p);
+  const HANDLE f = CreateFileA(h->path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+  Sleep(h->ms);
+  if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+  return 0;
+}
+bool save_while_held(const std::string& ini, DWORD ms, const re3cc::config::CheatSwitches& s) {
+  Hold h{ini, ms};
+  const HANDLE t = CreateThread(nullptr, 0, hold, &h, 0, nullptr);
+  Sleep(50);  // the file is held before the save starts
+  const bool saved = re3cc::config::save_cheats(s);
+  WaitForSingleObject(t, INFINITE);
+  CloseHandle(t);
+  return saved;
 }
 
 }  // namespace
@@ -144,6 +170,20 @@ int main() {
                 std::string::npos &&
             renewed.find("ToggleKey = 0x76\r\nGodMode = 1\r\nOneHitKills = 0\r\n") != std::string::npos,
         "the earlier builds' comment is brought up to date, the values written");
+
+  // Held by another program a moment (Windows: a virus scanner, an indexer): the
+  // replace is tried again until it goes through. Held for longer than the tries
+  // last: nothing is written, the file stays as it was, no temporary is left.
+  write_file(ini, expect);
+  const bool saved_held = save_while_held(ini, 250, god);
+  const std::string after_held = read_file(ini);
+  check(saved_held && after_held.find("InfiniteAmmo = 0\r\n") != std::string::npos &&
+            after_held.find("NoRecoveryItemCount = 0\r\n") != std::string::npos,
+        "a file held for a moment by another program is written once it lets go");
+  check(GetFileAttributesA((ini + ".tmp").c_str()) == INVALID_FILE_ATTRIBUTES, "no temporary file is left beside it");
+  const std::string held = read_file(ini);
+  check(!save_while_held(ini, 1500, on) && read_file(ini) == held, "one held for longer is left as it was");
+  check(GetFileAttributesA((ini + ".tmp").c_str()) == INVALID_FILE_ATTRIBUTES, "and no temporary file is left beside it");
 
   // The file deleted while the game runs: the defaults come back, with the switches in.
   DeleteFileA(ini.c_str());

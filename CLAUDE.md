@@ -71,7 +71,12 @@ HP - 1, and the grab kills pass over such a player - on every difficulty but Inf
 below). Now God mode cuts a lethal hit itself, in its own hook, and four vtable hooks (approved that day)
 hold off the kills Inferno adds without a killing hit: the zombie's and the Licker's grab kills, the
 zombie bite's hidden struggle prompt, the Drain Deimos's parasite. A game over with God mode on is logged
-with what it saw. Built and checked offline, not yet run in game. What only the running game can show is
+with what it saw. Built and checked offline, not yet run in game. Asked 2026-10-13 (the user: "did you
+ensure that this mod will work on windows? We've had issues with these previous RE mods on windows"): it has
+never run on Windows. Its Windows-only paths are RE2CabbyCodes', the code that met the Windows problems of the
+RE mods (the Steam overlay, DXGI wrappers, REFramework, the exit), and they were audited offline that day, with
+three fixes: the frame hook beside REFramework's, the ini's write-back beside a virus scanner, swapped mouse
+buttons. What stays open on Windows is listed under Windows below. What only the running game can show is
 listed under In-game checks below.
 
 ## Build, tools, tests
@@ -102,6 +107,7 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static t
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_proxy.cpp src/proxy.cpp src/log.cpp src/mem.cpp -o tests/build/test_proxy.exe   # + re3.exe + steam_api64.dll [others]
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_mem.cpp src/mem.cpp -o tests/build/test_mem.exe
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_config.cpp src/config.cpp src/log.cpp -o tests/build/test_config.exe   # the ini's write-back
+bash -c 'x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -Icontrib/imgui -static tests/test_app.cpp $(ls build/*.o | grep -v dllmain.o) $(find build/imgui -name "*.o") -luser32 -lshell32 -lole32 -lgdi32 -ldwmapi -ldxguid -luuid -ldinput8 -o tests/build/test_app.exe'   # + re3.exe: the frame hook beside another tool's (REFramework)
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_input.cpp src/input.cpp src/log.cpp src/mem.cpp src/config.cpp -luser32 -o tests/build/test_input.exe   # the input guard (a Graphics = null prefix)
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -static tests/test_load.cpp -o tests/build/test_load.exe            # + a folder with the built DLL and the stock one as _orig
 bash -c 'x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -Icontrib/imgui -static tests/test_discover.cpp $(ls build/*.o | grep -v dllmain.o) $(find build/imgui -name "*.o") -luser32 -lshell32 -lole32 -lgdi32 -ldwmapi -ldxguid -luuid -ldinput8 -o tests/build/test_discover.exe'
@@ -133,7 +139,13 @@ to 1199; the guts rule and Inferno without it simulated; no hit kills a living p
 damage -3000..6000 and HP 1..1200), `test_re` 250 checks pass (the four FSM nodes' methods and slots, the
 bite's prompt and target, the parasite's fields, GAME_OVER 7), `test_discover` 0 names missing (the four
 new hooks `waiting for ... to come up` - their FSMs load in the game), `test_clock`, `test_slots`,
-`test_records` and `test_load` pass.
+`test_records` and `test_load` pass. On 2026-10-13 (the Windows audit, the three fixes in; a fresh prefix with
+Wine's null graphics driver, so nothing reached the desktop or the GPU while the user played): every test
+above passes against the current DLL - `test_adopt` 34 checks (the swap chain half too: the null driver
+still makes a device), `test_re` 250, `test_proxy` 26 (RE3's Steam DLL and three other games'),
+`test_input` 15, `test_keyboard` 20 both ways, `test_config` with the held-file checks, `test_discover` 0
+names missing with re3.exe mapped at 0x7FFFF0C10000 and the stand-in VM at 0x7FFFFB380000 (Windows' range,
+Windows below) - and the new `test_app` 19 checks.
 
 ## ⛔ Rules
 
@@ -211,6 +223,81 @@ names (`app.ropeway` -> `offline`), plus:
 - **Records** are one set (no Ghost Survivors), with **Shop points**; two rewards open the harder modes;
   two records count from system-save tallies (Charlie dolls, locks).
 - **The Shop** is new (the mod had a panel beside it until 2026-10-12, and leaves it alone now).
+
+## Windows (audited offline 2026-10-13; never run there)
+
+The mod has run only under Proton. Its Windows-only paths are RE2CabbyCodes', which ran on Windows (a
+Windows 11 laptop, the RT build, DX12, the Steam overlay on; 2026-09-25) and met what follows there or in
+players' reports. `overlay_d3d.cpp`, `keyboard.cpp`, `proxy.cpp`, `mem.cpp`, `crash.cpp` and `dllmain.cpp` are
+that code, renamed. Checked for RE3:
+- **The Steam overlay** detours whatever a new swap chain's class vtable points to and keeps one saved
+  original per hook. A mod function in DXGI's class vtable crashed RE2 1.0.2 on the first frame (a loop, a
+  stack overflow). On Windows the mod writes into no vtable the overlay reads. It hooks re3.exe's
+  `CreateDXGIFactory1`/`2` imports - **its only dxgi imports**, as re2.exe's (d3d11: `D3D11CreateDevice`;
+  d3d12 is loaded at run time). It hooks the factory's class vtable in place (QueryInterface,
+  CreateSwapChain, ForHwnd, ForCoreWindow, ForComposition), and gives each swap chain made for the game's
+  window a private 64-slot copy of its vtable; a D3D12 swap chain's queue comes from the creation call. RE3's
+  window is class `via`, made by the thread that delay-loads the mod (thread 344 in both logs of 2026-10-13),
+  so `game_window` holds both ways. On AMD, `amd_ags_x64.dll` may make the device
+  (`agsDriverExtensionsDX11_CreateDevice`/`DX12_CreateDevice` are imported); a swap chain still comes from a
+  factory of the class hooked in place.
+- **DXGI wrappers**: OptiScaler's virtual destructor past the interface's 41 slots (RE2 1.0.3's crash),
+  Special K's QueryInterface without AddRef, OptiScaler answering every LoadLibrary of a dxgi.dll with
+  itself. Handled by 64-slot copies, proxies taken by their IID and never asked, and Windows' dxgi told by
+  its path. **REFramework's throwaway swap chain** (RE2 1.0.5: no REFramework mod worked): only the game's
+  window's swap chains are adopted, and the hooks call on through the class's slot as it is. `test_adopt`
+  plays all of it under Wine (`RE3CC_ADOPT`).
+- **REFramework's frame hooks** (its source, read 2026-10-13). `Hooks::hook_all_application_entries`, first in
+  its `m_hook_list`, replaces every via.Application entry's function pointer with a stub of its own
+  (VirtualAlloc'd: `mov rdx,name; mov r8,hash; mov r9,handler; jmp r9`). Its handler calls what it replaced,
+  looked up by the entry's name. This runs in its mods' `on_initialize`, on a thread its first Present
+  starts. The mod hooks UpdateBehavior and EndRendering before the game's first frame (the logs: ~0.9 s
+  before), so REFramework normally comes second and calls the mod's functions. Until 2026-10-13 `app::hook`
+  refused a function outside re3.exe's .text ("not the game's code - not hooked", logged every 0.5 s): had
+  REFramework come first, no tick at all. `check()` also logged REFramework's takeover as "moved in the table
+  (no longer hooked)" while the tick went on. Now a function in executable memory is taken for another
+  tool's: the mod goes in front of it and calls on to it. A takeover after the mod is logged as one and left
+  alone (putting the mod's back would run the mod twice a frame); `unhook` gives back only entries that still
+  hold the mod's function. `tests/test_app.cpp` builds the table with a REFramework-style stub in it.
+- **Start-up**: Windows starts faster. RE2 read knives and typewriters as 0 there before `re::init` waited for
+  the game's code to be linked; it waits here too (`re: waiting for the game's code to be linked`).
+- **Exit**: DllMain does nothing on a process exit (RE0 hung on close on Windows: the teardown under the
+  loader lock); the DLL pins itself.
+- **ASLR**: re3.exe is `DYNAMIC_BASE | HIGH_ENTROPY_VA`. On Windows it loads at a random high address and
+  the heap is above 4 GB; Proton puts it at 0x140000000 and the heap low (the VM at 0x11B94060). The code
+  truncates no pointer (read through by hand), takes every range from the module as loaded, assumes nothing
+  about where the heap lies against the exe, and `plausible` takes the whole user range. Wine 11.19 maps the tests' copies high: `test_discover` ran the start-up with
+  re3.exe at 0x7FFFF0C10000 and the VM at 0x7FFFFB380000. The DLL is relocatable (`.reloc`, `DYNAMIC_BASE`):
+  `test_adopt` loaded it at 0x6FFFF8A70000, not its base 0x2DA3F0000.
+- **The DLL's imports**: Windows' own DLLs and the UCRT's api sets (the same
+  `api-ms-win-crt-private-l1-1-0` functions as RE2CabbyCodes' DLL, which loaded on Windows 11). Wine is
+  told by `GetProcAddress(ntdll, "wine_get_version")`, never imported.
+- **Input**: the game registers the raw mouse with `RIDEV_INPUTSINK` (0x100) alone (the call at
+  exe+0x28BB506: usage page 1, usage 2), no `RIDEV_NOLEGACY`, so Windows sends the window its mouse
+  messages, as Wine does. `GetAsyncKeyState` reads the physical buttons (Windows' documentation) and the
+  messages the logical ones, so since 2026-10-13 the panel's per-frame button read follows `SM_SWAPBUTTON`
+  (buttons swapped for the left hand).
+- **The ini**: a virus scanner or an indexer holding the ini or its temporary file makes the replace fail
+  ("access denied", a sharing violation). Since 2026-10-13 it is tried 5 times, 100 ms apart, on the mod
+  thread; then the ini is left as it was and the log says so (`test_config` holds the file a moment, then
+  longer).
+- **Open on Windows**:
+  - **What is typed into a panel field reaches the game's DirectInput keyboard** - the pause menu behind
+    the panel - as in RE2 on Windows (its log line: `keyboard: Windows - the panel takes keys from the
+    window's messages (what is typed into it reaches the game too)`). The panel's own device and the guard
+    in dinput8's shared device vtable are Wine-only: the overlay hooks DirectInput devices the way it hooks
+    swap chains (RE2CabbyCodes' finding, `keyboard.cpp`), so a mod function in a vtable it reads again at a
+    later CreateDevice would be RE2 1.0.2's loop. The exe's GetAsyncKeyState/GetKeyState are guarded on Windows too. A guard safe
+    beside the overlay would hand the game proxy objects for its IDirectInput8 and its keyboard, from
+    re3.exe's `DirectInput8Create` import. Not built. (Not a private vtable copy of the real objects:
+    whether Windows' dinput8 checks an object's vtable pointer is not known, and Wine's would not show it.)
+  - Never run on Windows. The laptop (JoshLAP) has no RE3 (checked 2026-10-13). `RE3CC_ADOPT=1` in the
+    Steam launch options makes the mod take the Windows overlay path under Proton (the adoption, the queue
+    from the creation call). Not yet tried in game.
+  - Paths are ANSI (`GetModuleFileNameA`, `LoadLibraryA`, `fopen`): a game folder with characters outside
+    the system code page keeps the original Steam DLL from loading (under Proton too).
+  - A swap chain whose buffer count or format changes (HDR switched on in game) stops the DX12 panel until a
+    restart (logged). Under HDR its colours are not converted.
 
 ## The reverse-engineering record (build 24468913)
 
@@ -803,3 +890,14 @@ into further.
    kill, and what follows? The Drain Deimos's parasite left in past its time: `god mode: the Drain Deimos's
    parasite would have killed the player - held off`, no death, and a herb still takes it out. Any game over
    with God mode on: `god mode: a game over with God mode on - ...` says what it saw.
+20. Windows (Windows above). On Windows, or under Proton with `RE3CC_ADOPT=1` in the launch options: the
+   log's `overlay: 2 CreateDXGIFactory import(s) of re3.exe hooked` at start-up, `the game's DXGI factory
+   (from CreateDXGIFactory1 or 2 ...) ... hooked in place` before any swap chain, `the game made a swap chain
+   (CreateSwapChainForHwnd, D3D12 queue ...) - it has a vtable of its own now`, `the game presents through
+   Direct3D 12 (... - adopted as it was made ...)` and `dx12: panel renderer ready` with that queue - no
+   `looking for its command queue`, no `no swap chain of the game's presented its window in 10 s`. The same
+   with the game on DX11 (`device ...`, `dx11: panel renderer ready`). On Windows also: the panel at the
+   pause menu, a clean exit (`the process is exiting`), and with the Steam overlay on (Shift+Tab over the
+   game) no crash. With REFramework: its menu works, and the log has `app: another tool put its own
+   function (... (no module)) into UpdateBehavior's entry after the mod` (or `... already holds another
+   tool's function`), the panel's figures still moving (the tick goes on).

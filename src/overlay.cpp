@@ -1599,9 +1599,14 @@ bool wants_draw() {
   if (vis) {
     // The physical buttons are the truth: a press or release the window never
     // got as a message (Raw Input can take them) is still the panel's.
+    // GetAsyncKeyState reads the physical buttons, the messages say the logical
+    // ones: with the buttons swapped in Windows' mouse settings (left-handed),
+    // the panel's left button is the physical right one.
     static const int kVk[3] = {VK_LBUTTON, VK_RBUTTON, VK_MBUTTON};
+    const bool swapped = GetSystemMetrics(SM_SWAPBUTTON) != 0;
     for (int b = 0; b < 3; ++b) {
-      const bool down = focused && (GetAsyncKeyState(kVk[b]) & 0x8000) != 0;
+      const int vk = swapped && b < 2 ? kVk[1 - b] : kVk[b];
+      const bool down = focused && (GetAsyncKeyState(vk) & 0x8000) != 0;
       if (io.MouseDown[b] != down) io.AddMouseButtonEvent(b, down);
     }
   } else if (g_context_ready) {

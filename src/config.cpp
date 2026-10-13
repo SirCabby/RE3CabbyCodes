@@ -148,8 +148,20 @@ bool save_cheats(const CheatSwitches& s) {
     ok = std::fwrite(out.data(), 1, out.size(), f) == out.size();
     ok = std::fclose(f) == 0 && ok;
   }
-  if (!ok || !MoveFileExA(tmp, g_path, MOVEFILE_REPLACE_EXISTING)) {
-    const DWORD err = GetLastError();
+  // Windows: a virus scanner or an indexer looking at the new file (or the ini)
+  // holds it for a moment, and the replace fails with a sharing violation or
+  // "access denied" - tried again a few times, 100 ms apart (the mod's thread).
+  DWORD err = ok ? 0 : GetLastError();
+  for (int tries = 0; ok; ++tries) {
+    if (MoveFileExA(tmp, g_path, MOVEFILE_REPLACE_EXISTING)) break;
+    err = GetLastError();
+    if (tries >= 4 || (err != ERROR_SHARING_VIOLATION && err != ERROR_ACCESS_DENIED && err != ERROR_LOCK_VIOLATION)) {
+      ok = false;
+      break;
+    }
+    Sleep(100);
+  }
+  if (!ok) {
     if (f) DeleteFileA(tmp);
     logf("ERROR: config: the cheats' switches could not be saved to %s (error %lu) - the next start begins with the "
          "ones it has",
