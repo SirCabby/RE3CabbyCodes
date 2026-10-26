@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdio>
 #include <initializer_list>
+#include <vector>
 
 #include "call.h"
 #include "config.h"
@@ -43,9 +44,37 @@ enum Hook : int {
   kZombieKill,       // the zombie's kill attack (Em0000MFsmCondition_ReservedKillTarget.doEvaluate)
   kLickerKill,       // the Licker's grab kill (Em3000FsmCondition_CheckPlayerKill.doEvaluate)
   kBiteStart,        // the zombie bite's branch (EsEnemyMFsmAction_GrappleBranch.OnStart)
+  // The dx11_non-rt build's own (install): where its `lea`-made delegates cannot be
+  // reached, the same event heard at a virtual method.
+  kThinkDamage,      // One hit kills: EnemyThinkBehavior.onHitDamage, in every enemy Think class's vtable
+  kKnobUpdate,       // One hit kills on the final form's pustules: EsEm9300Knob.update, the pustule's frame
   kHookCount
 };
 constexpr int kFirstSlotHook = kFire;
+
+// A virtual method hooked in a whole family of classes: every class deriving from
+// the hook's class whose vtable has the slot, each with the code that slot held -
+// an override of its own or one inherited - kept against its vtable, so the one
+// replacement finds what to forward to from the object it is handed.
+constexpr int kFamily = 128;
+struct Family {
+  std::vector<uint32_t> classes;           // the family, found once (install)
+  std::atomic<uintptr_t> vtable[kFamily];  // written before the slot is exchanged
+  std::atomic<uintptr_t> original[kFamily];
+  uintptr_t slot[kFamily] = {};
+  std::atomic<int> count{0};
+};
+Family g_think_family;
+
+// The code a family's vtable held for `obj` (0: not one of the family's).
+uintptr_t family_original(const Family& f, uintptr_t obj) {
+  const uintptr_t info = mem::read_ptr(obj);
+  const uintptr_t table = info ? mem::read_ptr(info - 0x10) : 0;
+  const int n = f.count.load(std::memory_order_acquire);
+  for (int i = 0; table && i < n; ++i)
+    if (f.vtable[i].load(std::memory_order_relaxed) == table) return f.original[i].load(std::memory_order_relaxed);
+  return 0;
+}
 
 struct State {
   const char* name = "";
@@ -58,6 +87,8 @@ struct State {
   uintptr_t slot[8] = {};       // the vtable / interface slots exchanged
   int slots = 0;
   bool failed = false;          // not hookable this session (logged)
+  bool captured = false;        // a vtable slot the game copies into a delegate as it makes it: in before that (pending)
+  Family* family = nullptr;     // hooked in every class of a family (the dx11_non-rt build's)
   bool first_logged = false;
   DWORD waiting_since = 0;      // a vtable hook still waiting for its class (the log)
 };
@@ -72,6 +103,7 @@ inline Fn original(Hook h) {
 inline bool on(cheats::Kind k) { return cheats::enabled(k); }
 bool hooked(Hook h) {
   const State& st = g_hook[h];
+  if (st.family) return st.family->count.load() > 0;
   return st.original.load() && (st.record || st.slots > 0);
 }
 
@@ -143,6 +175,52 @@ void on_knob_damage(uintptr_t ctx, uintptr_t think, uintptr_t info) {
            static_cast<double>(was));
   }
   original<InfoFn>(kKnobDamage)(ctx, think, info);
+}
+
+// The dx11_non-rt build: the hit handlers above are `lea`-made delegates, which no
+// exchanged pointer reaches. There the hit is heard at the enemy's Think instead -
+// EnemyThinkBehavior.onHitDamage (virtual[76] in that build), which the hit handler
+// calls through the Think's vtable after the game's own addDamage and before its
+// "was alive and is not: dead()" - so the kill is made there: the HP to 0, or to 1
+// under GUTS_MODE (game.h, make_lethal_after), just before the Think's own
+// onHitDamage runs - Nemesis's second form moves his stages on from it, as from the
+// RT build's hit. Every enemy Think class's vtable holds this in the slot - its own
+// override or an inherited one - and the object's vtable says which to forward to.
+void on_think_damage(uintptr_t ctx, uintptr_t think, uintptr_t info) {
+  count(kThinkDamage);
+  if (on(cheats::kOneHitKills)) {
+    if (const uintptr_t enemy = game::think_controller(think)) {
+      bool to_floor = false;
+      const int was = game::make_lethal_after(game::enemy_hit_points(enemy), enemy, info, &to_floor);
+      trace_lethal("its Think", enemy, was, to_floor);
+    }
+  }
+  if (const uintptr_t code = family_original(g_think_family, think)) reinterpret_cast<InfoFn>(code)(ctx, think, info);
+}
+
+// The dx11_non-rt build: the pustules' handler above is a `lea`-made delegate too
+// (made in EsEm9300Think.onThinkAwake), and nothing virtual is on a pustule's hit.
+// There each pustule's own frame is heard instead - EsEm9300Knob.update (virtual[14]
+// in that build; approved by the user 2026-10-22) - and while One hit kills is on an
+// Alive pustule is kept at a sliver of life (game.h, weaken_knob), so its next
+// damaging hit bursts it through the game's own handler. With the cheat off nothing
+// is read, but for putting back, once, the lives it lowered (restore_knob).
+void on_knob_update(uintptr_t ctx, uintptr_t knob) {
+  count(kKnobUpdate);
+  original<UpdateFn>(kKnobUpdate)(ctx, knob);
+  if (call::exception_pending(ctx)) return;
+  int no = -1;
+  if (on(cheats::kOneHitKills)) {
+    const float was = game::weaken_knob(knob, &no);
+    if (was > 0.0f && config::get().trace)
+      logf("one hit kills: the final form's pustule %d kept at a sliver of its %.0f life - its next damaging hit "
+           "bursts it",
+           no, static_cast<double>(was));
+  } else if (game::knobs_weakened()) {
+    const float back = game::restore_knob(knob, &no);
+    if (back > 0.0f && config::get().trace)
+      logf("one hit kills: off - the final form's pustule %d has its %.0f life back", no, static_cast<double>(back));
+  }
 }
 
 // --- God mode ---------------------------------------------------------------------------------------------
@@ -484,6 +562,50 @@ void hook_slots(Hook h, bool interfaces) {
        re::classes_sharing_vtable(st.cls));
 }
 
+// A family hook (the dx11_non-rt build's One hit kills): every class of the family
+// whose vtable is up and holds the game's code in the slot - recorded with that
+// code, then exchanged. Classes still to come up are tried again each second; a
+// vtable two classes share is hooked once.
+void hook_family(Hook h) {
+  State& st = g_hook[h];
+  Family* f = st.family;
+  if (st.failed || !f || !st.method) return;
+  const int vt = re::method_vt_index(st.method);
+  if (vt < 0) return fail(st, "its method is not virtual");
+  const mem::Range text = mem::section(GetModuleHandleA(nullptr), ".text");
+  int added = 0, up = 0;
+  for (const uint32_t t : f->classes) {
+    const uintptr_t table = re::vtable_of(t);
+    if (!table) continue;  // not up yet
+    ++up;
+    const uintptr_t slot = table + static_cast<uintptr_t>(vt) * 8;
+    const uintptr_t code = mem::read_ptr(slot);
+    if (code == st.replacement || !text.contains(code)) continue;  // hooked (a shared vtable), or not the game's code
+    const int n = f->count.load(std::memory_order_relaxed);
+    bool known = false;
+    for (int i = 0; i < n; ++i) known = known || f->vtable[i].load(std::memory_order_relaxed) == table;
+    if (known) continue;
+    if (n >= kFamily) {
+      logf("events: %s - more than %d vtables: %s is not hooked", st.name, kFamily, re::full_name(t).c_str());
+      break;
+    }
+    // Recorded before the exchange: the game may call the slot the moment it holds the hook.
+    f->vtable[n].store(table, std::memory_order_relaxed);
+    f->original[n].store(code, std::memory_order_relaxed);
+    f->slot[n] = slot;
+    f->count.store(n + 1, std::memory_order_release);
+    if (re::swap_slot(slot, code, st.replacement)) ++added;
+  }
+  if (added) {
+    if (!st.original.load()) st.original = f->original[0].load();
+    logf("events: %s hooked in %d more vtable(s) (%d in all, slot %d; %d of the %u classes up)", st.name, added,
+         f->count.load(), vt, up, static_cast<unsigned>(f->classes.size()));
+  } else if (!up && !st.waiting_since) {
+    st.waiting_since = GetTickCount();
+    logf("events: %s - waiting for its %u classes to come up", st.name, static_cast<unsigned>(f->classes.size()));
+  }
+}
+
 }  // namespace
 
 void install() {
@@ -533,18 +655,59 @@ void install() {
          reinterpret_cast<uintptr_t>(&on_licker_kill), ev.licker_kill_check);
   define(kBiteStart, "EsEnemyMFsmAction_GrappleBranch.OnStart (God mode: a zombie's bite)",
          game::parts().bite_prompt ? ev.bite_start : 0, reinterpret_cast<uintptr_t>(&on_bite_start), ev.bite_branch);
+  // The dx11_non-rt build (TDB 67) makes the hit handlers' delegates from the code
+  // itself - `lea r9,[code]` before the new-delegate helper, no global, no database
+  // entry read (tools/tdb_dump.py --link and a scan of the code for each method's
+  // address) - so an exchanged entry is never read. RE2CabbyCodes' dx11_non-rt build
+  // did the same, and its events were heard at virtual methods there instead
+  // (approved by RE2CabbyCodes' user 2026-09-24); these are RE3's counterparts:
+  //  - God mode: the player's two handlers are made in SurvivorCondition
+  //    .entryDelegateHitController from the player's vtable - `mov rcx,[info-0x10];
+  //    mov r9,[rcx+slot*8]` - so they are vtable hooks, in PlayerCondition's own table,
+  //    in before a player starts (pending: serviced every 100 ms until they are).
+  //  - One hit kills: the enemy's Think, told of the hit after the damage, in every
+  //    Think class (kThinkDamage).
+  if (re::tdb_version() == 67) {
+    g_hook[kPlayerCheck].cls = ev.player;
+    g_hook[kPlayerDamage].cls = ev.player;
+    g_hook[kPlayerCheck].captured = g_hook[kPlayerDamage].captured = true;
+    for (const Hook h : {kEnemyDamage, kReactionDamage})
+      if (g_hook[h].method)
+        fail(g_hook[h], "the dx11_non-rt build makes this delegate with `lea` - its event is heard at a virtual "
+                        "method there");
+    if (g_hook[kKnobDamage].method)
+      fail(g_hook[kKnobDamage], "the dx11_non-rt build makes this delegate with `lea` in EsEm9300Think.onThinkAwake, "
+                                "and nothing virtual is on a pustule's hit - the pustules are heard at their own frame "
+                                "there");
+    auto family_of = [](Hook h, Family* f) {
+      g_hook[h].family = f;
+      f->classes.clear();
+      for (uint32_t t = 1; g_hook[h].cls && t < re::num_types(); ++t)
+        if (re::derives(t, g_hook[h].cls)) f->classes.push_back(t);
+    };
+    define(kThinkDamage, "EnemyThinkBehavior.onHitDamage (One hit kills, the dx11_non-rt build)", ev.think_damage,
+           reinterpret_cast<uintptr_t>(&on_think_damage), ev.think);
+    family_of(kThinkDamage, &g_think_family);
+    // One hit kills on the final form's pustules: each pustule's own frame.
+    define(kKnobUpdate, "EsEm9300Knob.update (One hit kills: the final form's pustules, the dx11_non-rt build)",
+           game::parts().knobs ? ev.knob_update : 0, reinterpret_cast<uintptr_t>(&on_knob_update), ev.knob);
+  }
   if (config::get().disable_events) {
     g_disabled = true;
     logf("events: disabled by config - the cheats do nothing this session");
     return;
   }
   for (int h = 0; h < kFirstSlotHook; ++h)
-    if (!g_hook[h].failed) hook_entry(static_cast<Hook>(h));
+    if (!g_hook[h].cls && !g_hook[h].failed) hook_entry(static_cast<Hook>(h));
   service();
 }
 
 void service() {
   if (g_disabled) return;
+  if (g_hook[kPlayerCheck].cls) hook_slots(kPlayerCheck, false);
+  if (g_hook[kPlayerDamage].cls) hook_slots(kPlayerDamage, false);
+  if (g_hook[kThinkDamage].family) hook_family(kThinkDamage);
+  if (g_hook[kKnobUpdate].cls) hook_slots(kKnobUpdate, false);
   hook_slots(kFire, false);
   hook_slots(kSaveData, true);
   hook_slots(kClockSave, true);
@@ -583,11 +746,18 @@ void service() {
   }
 }
 
+bool pending() {
+  if (g_disabled) return false;
+  for (const State& st : g_hook)
+    if (st.captured && st.method && st.cls && !st.failed && st.slots == 0) return true;
+  return false;
+}
+
 bool ready(cheats::Kind k) {
   if (g_disabled) return false;
   const game::Parts& p = game::parts();
   switch (k) {
-    case cheats::kOneHitKills: return p.enemies && p.damage && hooked(kEnemyDamage);
+    case cheats::kOneHitKills: return p.enemies && p.damage && (hooked(kEnemyDamage) || hooked(kThinkDamage));
     case cheats::kGodMode: return p.players && hooked(kPlayerCheck) && hooked(kPlayerDamage);
     case cheats::kInfiniteAmmo: return p.equipped && hooked(kFire);
     case cheats::kNoSaveCount: return p.header && hooked(kSaveData);
@@ -628,7 +798,7 @@ const char* why_not(cheats::Kind k) {
   if (g_disabled) return "events disabled in the ini";
   auto state = [](Hook h) { return g_hook[h].failed ? "not hookable (see the log)" : "waiting for the game"; };
   switch (k) {
-    case cheats::kOneHitKills: return state(kEnemyDamage);
+    case cheats::kOneHitKills: return state(re::tdb_version() == 67 ? kThinkDamage : kEnemyDamage);
     case cheats::kGodMode: return state(kPlayerCheck);
     case cheats::kInfiniteAmmo: return state(kFire);
     case cheats::kNoSaveCount: return state(kSaveData);
@@ -647,6 +817,8 @@ void uninstall() {
     if (st.record && re::unhook_method(st.record, st.replacement, orig)) st.record = 0;
     for (int i = 0; i < st.slots; ++i) re::swap_slot(st.slot[i], st.replacement, orig);
     st.slots = 0;
+    if (Family* f = st.family)
+      for (int i = 0, n = f->count.load(); i < n; ++i) re::swap_slot(f->slot[i], st.replacement, f->original[i].load());
   }
 }
 

@@ -71,6 +71,20 @@ re::Field f_hp_nodamage, f_di_damage, f_di_kill, f_enemy_flags2, f_bitflag_flag,
 // HitController a hit landed on.
 uint32_t t_knob;
 re::Field f_knob_list, f_knob_hc, f_knob_life, f_knob_hit_damage, f_knob_state, f_knob_no, f_di_hit_hc;
+// The dx11_non-rt build's hook point (EventTargets): an enemy's Think and its controller.
+uint32_t t_think;
+re::Field f_think_controller;
+// The pustules' lives the mod lowered there (weaken_knob), to put back (restore_knob):
+// written from the pustules' own frames, which the game may run on several threads.
+struct KnobMark {
+  uintptr_t knob;
+  float life;
+};
+constexpr int kKnobMarks = 32;
+KnobMark g_knob_marks[kKnobMarks];
+int g_knob_marked = 0, g_knob_next = 0;  // marks in use; the one to reuse when all are
+std::atomic<int> g_knobs_weakened{0};     // g_knob_marked, read with no lock
+SRWLOCK g_knob_lock = SRWLOCK_INIT;
 re::Field f_eq_condition, f_cond_inventory, f_inv_main_slot, f_clock_measure;
 re::Field f_skip_restrict;
 re::Field f_bullet_ud, f_bullet_combos, f_wc_type, f_wc_combos, f_pc_parts, f_pc_priority, f_pc_overwrite, f_pc_infinity,
@@ -214,7 +228,10 @@ bool discover() {
   i_clock = need_field(t_clock, "_Instance");
   i_record = need_field(t_record, "_Instance");
 
-  f_state = need_field(t_main_flow, "_CurrentMainState");
+  // The main state: a field of its own in the current build, the auto-property's
+  // backing field in the dx11_non-rt build - both what MainStateValue reads.
+  f_state = t_main_flow ? re::find_field(t_main_flow, "_CurrentMainState") : re::Field{};
+  if (!f_state.valid()) f_state = need_field(t_main_flow, "<MainStateValue>k__BackingField");
   f_header = need_field(t_main_flow, "gameHeaderSaveData");
   f_save_times = need_field(t_header, "SaveTimes");
   f_player_list = need_field(t_player_mgr, "PlayerList");
@@ -527,6 +544,14 @@ bool discover() {
   ev.final_form = need_type("offline.escape.enemy.em9300.EsEm9300Think");
   ev.knob_damage = need_method(ev.final_form, "onHitDamageKnob", {kDamageInfo});
   f_knob_list = need_field(ev.final_form, "KnobList");
+  // The dx11_non-rt build's (game.h, EventTargets): every enemy's Think, told of the hit
+  // by the enemy's hit handler after the damage.
+  t_think = need_type("offline.enemy.EnemyThinkBehavior");
+  f_think_controller = need_field(t_think, "<Controller>k__BackingField");
+  ev.think = t_think;
+  ev.think_damage = need_method(t_think, "onHitDamage", {kDamageInfo});
+  ev.knob = t_knob;
+  ev.knob_update = need_method(t_knob, "update", {});
   ev.fire = need_method(t_equipment, "executeFire", {"offline.EquipmentDefine.WeaponType", "System.Int32"});
   ev.save_data = need_method(t_main_flow, "saveGameSaveData", {});
   // Freeze play time: a save captures the clock's own save data here (IGameSaveData
@@ -1585,6 +1610,33 @@ int make_lethal(uintptr_t hpc, uintptr_t enemy, uintptr_t info, bool* to_floor) 
   return hp;
 }
 
+uintptr_t think_controller(uintptr_t think) {
+  if (!think || !t_think || !f_think_controller.valid() || !re::is_a(think, t_think)) return 0;
+  const uintptr_t enemy = ref(think, f_think_controller);
+  return enemy && re::is_a(enemy, t_enemy_ctl) ? enemy : 0;
+}
+
+int make_lethal_after(uintptr_t hpc, uintptr_t enemy, uintptr_t info, bool* to_floor) {
+  if (to_floor) *to_floor = false;
+  if (!g_parts.damage || !hpc || !info || !re::is_a(info, t_damage_info)) return -1;
+  int32_t damage = 0, hp = 0;
+  uint8_t no_damage = 0;
+  // A hit that did damage and left the enemy standing; the same holds as make_lethal's.
+  if (!get(info, f_di_damage, &damage) || damage <= 0 || !get(hpc, f_hp_cur, &hp) || hp <= 0) return -1;
+  if (get(hpc, f_hp_nodamage, &no_damage) && no_damage) return -1;
+  if (enemy_flagged(enemy, g_stop_damage)) return -1;
+  // GUTS_MODE: to the 1 the game holds it at, and the hit left the game's (make_lethal).
+  const bool guts = enemy_flagged(enemy, g_guts);
+  const int32_t left = lethal_hp_after(hp, damage, guts);
+  if (left < 0 || !put<int32_t>(hpc, f_hp_cur, left)) return -1;
+  if (guts) {
+    if (to_floor) *to_floor = true;
+    return hp;
+  }
+  put<uint8_t>(info, f_di_kill, 1);
+  return hp;
+}
+
 float burst_knob(uintptr_t think, uintptr_t info, int* knob_no) {
   if (knob_no) *knob_no = -1;
   if (!g_parts.knobs || !think || !info || !re::is_a(think, g_events.final_form) || !re::is_a(info, t_damage_info))
@@ -1609,6 +1661,62 @@ float burst_knob(uintptr_t think, uintptr_t info, int* knob_no) {
     return burst >= 0.0f && put<float>(knob, f_knob_life, burst) ? life : -1.0f;
   }
   return -1.0f;
+}
+
+float weaken_knob(uintptr_t knob, int* knob_no) {
+  if (knob_no) *knob_no = -1;
+  if (!g_parts.knobs || !knob || !re::is_a(knob, t_knob)) return -1.0f;
+  int32_t state = -1;
+  float life = 0.0f;
+  // UpdateDamageLife takes life only from a pustule that is Alive (burst_knob).
+  if (!get(knob, f_knob_state, &state) || state != k_knob_alive || !get(knob, f_knob_life, &life)) return -1.0f;
+  const float sliver = knob_sliver(life);
+  if (sliver < 0.0f) return -1.0f;  // at the sliver already (or below it: a hit's to burst)
+  uint32_t no = 0;
+  if (knob_no && get(knob, f_knob_no, &no)) *knob_no = static_cast<int>(no);
+  // Remembered before it is written: restore_knob finds the mark only with the sliver in.
+  AcquireSRWLockExclusive(&g_knob_lock);
+  int at = -1;
+  for (int i = 0; i < g_knob_marked && at < 0; ++i)
+    if (g_knob_marks[i].knob == knob) at = i;  // a life the game set again since (a new pattern)
+  if (at < 0 && g_knob_marked < kKnobMarks) at = g_knob_marked++;
+  if (at < 0) at = g_knob_next++ % kKnobMarks;  // all in use (pustules made anew): the oldest goes
+  g_knob_marks[at] = KnobMark{knob, life};
+  g_knobs_weakened.store(g_knob_marked, std::memory_order_relaxed);
+  ReleaseSRWLockExclusive(&g_knob_lock);
+  return put<float>(knob, f_knob_life, sliver) ? life : -1.0f;
+}
+
+float restore_knob(uintptr_t knob, int* knob_no) {
+  if (knob_no) *knob_no = -1;
+  if (!knob || !knobs_weakened()) return -1.0f;
+  float life = -1.0f;
+  AcquireSRWLockExclusive(&g_knob_lock);
+  for (int i = 0; i < g_knob_marked; ++i)
+    if (g_knob_marks[i].knob == knob) {
+      life = g_knob_marks[i].life;
+      g_knob_marks[i] = g_knob_marks[--g_knob_marked];
+      break;
+    }
+  g_knobs_weakened.store(g_knob_marked, std::memory_order_relaxed);
+  ReleaseSRWLockExclusive(&g_knob_lock);
+  if (life <= 0.0f || !g_parts.knobs || !re::is_a(knob, t_knob)) return -1.0f;
+  // Only the mod's own sliver is put back: a life the game has set since, or a burst
+  // pustule's 0, is the game's.
+  float now = 0.0f;
+  if (!get(knob, f_knob_life, &now) || now != kKnobSliver) return -1.0f;
+  uint32_t no = 0;
+  if (knob_no && get(knob, f_knob_no, &no)) *knob_no = static_cast<int>(no);
+  return put<float>(knob, f_knob_life, life) ? life : -1.0f;
+}
+
+bool knobs_weakened() { return g_knobs_weakened.load(std::memory_order_relaxed) > 0; }
+
+void forget_knob_marks() {
+  AcquireSRWLockExclusive(&g_knob_lock);
+  g_knob_marked = g_knob_next = 0;
+  g_knobs_weakened.store(0, std::memory_order_relaxed);
+  ReleaseSRWLockExclusive(&g_knob_lock);
 }
 
 bool is_player(uintptr_t cond) { return t_player_cond && cond && re::is_a(cond, t_player_cond); }

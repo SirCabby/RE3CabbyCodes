@@ -23,11 +23,19 @@
 // switches it reads are atomics (cheats.h). These are RE2CabbyCodes' hooks at
 // RE3's counterparts of the same methods, plus the two places RE3 counts what
 // RE2 counted in one: its own item box gimmick (EsGimmickItemLocker) and the
-// recovery items used from a shortcut (EsPlayerActionOrderer).
+// recovery items used from a shortcut (EsPlayerActionOrderer). The dx11_non-rt
+// build makes the hit handlers' delegates from their code instead of from their
+// entries: there God mode is hooked in the player's vtable and One hit kills at
+// every enemy's Think (events.cpp, install).
 namespace re3cc::events {
 
 void install();    // mod thread, right after game::discover(): the database entries; logs each
 void service();    // mod thread, every second: vtable slots as classes come up; first calls to the log
+// A vtable hook the game copies into a delegate as it makes it, still waiting for
+// its class: the mod thread then services every 100 ms rather than every second.
+// Only God mode's in the dx11_non-rt build - read into the player's delegates as it
+// starts, so they have to be in before a player is.
+bool pending();
 bool ready(cheats::Kind k);           // the cheat's events are hooked (it works)
 bool records_screen_hooked();         // the mod hears the records screen's frames (the records panel)
 bool save_list_hooked(int screen);    // savefiles::Screen: the mod hears that screen's frames (the save files)

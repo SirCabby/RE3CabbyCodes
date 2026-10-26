@@ -23,7 +23,7 @@ This mod is open source! Check it out at [url=https://github.com/SirCabby/RE3Cab
 
 [size=5][b]Install[/b][/size]
 
-For the current Steam version of the game (build 24468913). Copy into the game's folder - the one with re3.exe (in Steam: right-click the game > Manage > Browse local files):
+For both Steam versions of the game: the current one (build 24468913) and the [b]dx11_non-rt[/b] beta without ray tracing (Properties > Betas, build 11047294). Copy into the game's folder - the one with re3.exe (in Steam: right-click the game > Manage > Browse local files):
 [list=1]
 [*]Rename the stock [b]steam_api64.dll[/b] to [b]steam_api64_orig.dll[/b]
 [*]Drop this mod's [b]steam_api64.dll[/b] in its place
@@ -33,9 +33,9 @@ That is the whole install, on [b]Windows and Linux/Proton alike[/b] - no launch 
 
 To uninstall: delete steam_api64.dll and rename steam_api64_orig.dll back.
 
-[b]Steam's "Verify integrity of game files" removes the mod[/b] by restoring the stock DLL. Just re-copy the file.
+[b]Steam's "Verify integrity of game files" removes the mod[/b] by restoring the stock DLL. Just re-copy the file. [b]Switching between the two versions[/b] in Steam replaces steam_api64.dll too: delete steam_api64_orig.dll (the other version's) and do both steps again.
 
-If steam_api64_orig.dll is missing or is not the game's own, or the game is another version (such as the dx11_non-rt beta), the mod says what is wrong - in a message box as the game starts, or in the panel (F7). For anything else, attach [b]RE3CabbyCodes.log[/b] and [b]RE3CabbyCodes.prev.log[/b] from the game's folder.
+If steam_api64_orig.dll is missing or is not the game's own, or the game is another version (a future update, say), the mod says what is wrong - in a message box as the game starts, or in the panel (F7). For anything else, attach [b]RE3CabbyCodes.log[/b] and [b]RE3CabbyCodes.prev.log[/b] from the game's folder.
 
 
 [size=5][b]Config[/b][/size]

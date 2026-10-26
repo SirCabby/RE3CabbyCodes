@@ -415,7 +415,10 @@ void tick(int state, bool in_game, bool paused) {
   // God mode's record of the hits on the player starts afresh with each game, and
   // a game over with it on is logged with what it saw.
   static bool s_game_over = false;
-  if (started) events::forget_player_hits();
+  if (started) {
+    events::forget_player_hits();
+    game::forget_knob_marks();  // the dx11_non-rt build's pustules (game.h, weaken_knob)
+  }
   const bool game_over = game::game_over_state_is(state);
   if (game_over && !s_game_over && enabled(kGodMode)) log_god_mode_death();
   s_game_over = game_over;

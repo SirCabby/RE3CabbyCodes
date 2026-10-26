@@ -1,5 +1,6 @@
 // Offline test of One hit kills' arithmetic (src/game.h: lethal_hp, burst_life) -
-// the HP or life the hooks put in before the game's own handler takes a hit -
+// the HP or life the hooks put in before the game's own handler takes a hit, or
+// (lethal_hp_after, the dx11_non-rt build) once its addDamage has -
 // against the game's own rules for the two NEST 2 fights it did nothing in
 // (reported 2026-10-12), and of God mode's floor (survivable_damage) against the
 // game's guts rule it stands in for on Inferno (reported 2026-10-13: God mode did
@@ -28,6 +29,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 #include <limits>
 
 #include "../src/game.h"
@@ -35,7 +37,10 @@
 namespace {
 
 using re3cc::game::burst_life;
+using re3cc::game::kKnobSliver;
+using re3cc::game::knob_sliver;
 using re3cc::game::lethal_hp;
+using re3cc::game::lethal_hp_after;
 using re3cc::game::survivable_damage;
 
 int g_fail = 0;
@@ -49,14 +54,21 @@ void check(bool ok, const char* what) {
 int cut(int hp, int damage, bool guts) { return guts && damage >= hp ? hp - 1 : damage; }
 int add_damage(int hp, int damage) { return hp - std::abs(damage) > 0 ? hp - std::abs(damage) : 0; }
 
-// One hit: One hit kills' write (when `on`), then the game's addDamage.
-int hit(int hp, int damage, bool guts, bool on) {
+// One hit: One hit kills' write (when `on`), then the game's addDamage - or, `after`
+// (the dx11_non-rt build: the hit heard at the enemy's Think), the game's addDamage,
+// then the write.
+int hit(int hp, int damage, bool guts, bool on, bool after = false) {
   const int d = cut(hp, damage, guts);
-  if (on) {
+  if (on && !after) {
     const int64_t put = lethal_hp(hp, d, guts);
     if (put >= 0) hp = static_cast<int>(put);
   }
-  return add_damage(hp, d);
+  hp = add_damage(hp, d);
+  if (on && after) {
+    const int32_t put = lethal_hp_after(hp, d, guts);
+    if (put >= 0) hp = put;
+  }
+  return hp;
 }
 
 void test_rule() {
@@ -73,6 +85,23 @@ void test_rule() {
   const int32_t big = std::numeric_limits<int32_t>::max();
   check(lethal_hp(big, big - 1, true) == -1 && lethal_hp(big, big - 2, true) == big - 1,
         "GUTS_MODE at the top of the range: no overflow");
+}
+
+// The dx11_non-rt build: the same hit, the write made once addDamage has run.
+void test_rule_after() {
+  check(lethal_hp_after(900, 100, false) == 0, "after the damage: an enemy left standing goes to 0");
+  check(lethal_hp_after(900, 100, true) == 1, "...and to 1 under GUTS_MODE");
+  check(lethal_hp_after(1, 100, true) == -1 && lethal_hp_after(0, 100, false) == -1,
+        "on 1 under GUTS_MODE, or at 0: nothing to write");
+  check(lethal_hp_after(900, 0, false) == -1 && lethal_hp_after(900, -5, true) == -1,
+        "a hit that did no damage: nothing");
+  // Wherever the RT build's write before the damage leaves an enemy, the write after it does too.
+  bool same = true;
+  for (int hp = 1; hp <= 600 && same; ++hp)
+    for (int damage = -3; damage <= 700 && same; ++damage)
+      for (const bool guts : {false, true})
+        same = same && hit(hp, damage, guts, true, false) == hit(hp, damage, guts, true, true);
+  check(same, "the HP left is the same either way, for HP 1..600, damage -3..700, with and without GUTS_MODE");
 }
 
 // Nemesis's second form in NEST 2 (chapter 5), the game's own rules (see the top).
@@ -95,10 +124,10 @@ void on_hit_damage(Nemesis2& n) {
 
 // Shots of `damage` until the death scene starts (HP at 1 in the last stage), or -1
 // within `cap` shots.
-int shots_to_end(int max_hp, int damage, bool on, int cap) {
+int shots_to_end(int max_hp, int damage, bool on, int cap, bool after = false) {
   Nemesis2 n{max_hp, max_hp, 1};
   for (int shots = 1; shots <= cap; ++shots) {
-    n.hp = hit(n.hp, damage, true, on);
+    n.hp = hit(n.hp, damage, true, on, after);
     on_hit_damage(n);
     if (n.mode == 3 && n.hp <= 1) return shots;
   }
@@ -110,6 +139,8 @@ void test_second_form() {
   check(shots_to_end(5000, 100, true, 1000) == 3, "One hit kills: three shots - one a stage, the third starts his death");
   check(shots_to_end(5000, 1, true, 1000) == 3, "...whatever a shot does");
   check(shots_to_end(5000, 100, false, 1000) == 50, "without it a handgun's 100 takes fifty (the old rule left him alone)");
+  check(shots_to_end(5000, 100, true, 1000, true) == 3 && shots_to_end(5000, 1, true, 1000, true) == 3,
+        "the dx11_non-rt build (the HP to 1 before his Think's onHitDamage): three shots too");
   Nemesis2 n{5000, 5000, 1};
   n.hp = hit(n.hp, 100, true, true);
   check(n.hp == 1, "the first shot takes him to 1...");
@@ -135,6 +166,22 @@ void test_pustules() {
   check(burst_life(std::nanf(""), 100.0f) == -1.0f && burst_life(230.0f, std::nanf("")) == -1.0f,
         "a life or damage that is not a number: nothing");
   check(update_damage_life(burst_life(230.0f, 0.25f), 0.25f) == 0.0f, "the life put in is exactly what the hit takes");
+
+  // The dx11_non-rt build: no hook on a pustule's hit, so its life is kept at the sliver
+  // from its own frame while the cheat is on (weaken_knob).
+  bool bursts = true;
+  for (float life = 200.0f; life <= 250.0f; life += 0.5f) {
+    const float put = knob_sliver(life);
+    bursts = bursts && put == kKnobSliver && update_damage_life(put, 100.0f) == 0.0f &&
+             update_damage_life(put, 500.0f) == 0.0f && update_damage_life(put, 1.0f) == 0.0f;
+  }
+  check(bursts, "the dx11_non-rt build: a pustule kept at the sliver bursts on its next hit - a handgun's 100, the "
+                "RAI-DEN's 500, a hit of 1");
+  check(update_damage_life(kKnobSliver, 0.0f) == kKnobSliver,
+        "...and takes nothing from a hit of none (the fight guarding), as a pustule at full life");
+  check(update_damage_life(kKnobSliver, kKnobSliver) == 0.0f, "a hit of the sliver itself bursts it");
+  check(knob_sliver(kKnobSliver) == -1.0f && knob_sliver(0.0f) == -1.0f && knob_sliver(std::nanf("")) == -1.0f,
+        "a life at the sliver, at 0 (burst) or not a number: nothing to write");
 }
 
 // A hit on the player, the game's side: the guts rule's cut (all difficulties but
@@ -187,6 +234,7 @@ void test_god_mode() {
 
 int main() {
   test_rule();
+  test_rule_after();
   test_second_form();
   test_pustules();
   test_god_mode();

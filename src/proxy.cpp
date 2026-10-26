@@ -9,14 +9,16 @@
 //
 // Any Steam DLL will do as the original if it has what the game imports - the
 // names re3.exe's import and delay-load tables ask steam_api64.dll for, read as
-// the proxy loads (12 in build 24468913, all delay-loaded). The game's own Steam
-// DLL is the very file RE2's current build ships (same SHA-256), so the export
-// list is RE2CabbyCodes'. Every other version of the DLL lacks some of the 1018
-// (Valve drops old flat functions as it adds new ones: a 2017 DLL lacks 340, an
-// SDK 1.57 one 24), and a DLC unlocker's or another game's DLL renamed in its
-// place is no different. What the original lacks answers 0 (steam_missing), and
-// the log says how much that is and whether the original is the DLL the game
-// ships (kStock). Only what the game itself needs is fatal - a function the
+// the proxy loads (the same 12 in either build, all delay-loaded). The current
+// build's own Steam DLL is the very file RE2's current build ships (same
+// SHA-256), so the export list is RE2CabbyCodes'. The dx11_non-rt build's own, of
+// 2019, lacks 238 of the 1018 - none of them one either build imports. Every
+// other version of the DLL lacks some of the 1018 too (Valve drops old flat
+// functions as it adds new ones: a 2017 DLL lacks 340, an SDK 1.57 one 24), and a
+// DLC unlocker's or another game's DLL renamed in its place is no different. What
+// the original lacks answers 0 (steam_missing), and the log says how much that is
+// and whether the original is one of the DLLs the game's Steam versions ship
+// (kStock). Only what the game itself needs is fatal - a function the
 // original lacks (the game could not run with that DLL, mod or not), or one this
 // proxy does not export at all (another version of the game) - and then DllMain
 // shows failure() and refuses to load. RE2CabbyCodes' first release refused any
@@ -90,11 +92,14 @@ constexpr char kFixSteps[] =
     "files. That puts the game's own steam_api64.dll back, in place of the mod's. Then rename it to "
     "steam_api64_orig.dll and copy the mod's steam_api64.dll in beside it again.";
 
-// The Steam DLL the game ships, known by size, link stamp and export count - the
-// same file on every install (SHA-256 ca1fa9a7...eea73). It has every function
-// this proxy exports. Any other is described in the log against it, never called
-// wrong for that alone: RE2CabbyCodes learned that a player with a working file
-// takes "not the Steam DLL the mod was made for" for the fault.
+// The Steam DLLs the game's two Steam versions ship, known by size, link stamp
+// and export count - the same files on every install (SHA-256 ca1fa9a7...eea73
+// and e61ac9a9...99150). The current version's has every function this proxy
+// exports; the dx11_non-rt beta's is from an older SDK and lacks 238 of them,
+// none of which that version of the game imports. So on the beta the right file
+// is one the proxy stubs for, and the log must not call it wrong: RE2CabbyCodes
+// learned that a player with a working file takes "not the Steam DLL the mod was
+// made for" for the fault (its 1.0.1 and 1.0.2 said so on its own beta).
 struct Stock {
   unsigned long long size;
   DWORD stamp;
@@ -103,6 +108,7 @@ struct Stock {
 };
 constexpr Stock kStock[] = {
     {265504, 0x5FDFD901, 1019, "the current version's"},  // build 24468913, linked 2020-12-20
+    {288032, 0x5C6B2CF7, 941, "the dx11_non-rt beta's"},  // build 11047294, linked 2019-02-18
 };
 
 // The module this code is in: the mod's DLL (a test's exe when linked into one).
@@ -165,7 +171,7 @@ const Stock* describe(const char* path, HMODULE m, char* out, size_t n) {
   return nullptr;
 }
 
-// The game's own, for the log line of an original that is not it.
+// The game's own, for the log line of an original that is neither.
 void describe_stock(char* out, size_t n) {
   out[0] = '\0';
   for (const Stock& s : kStock) {
@@ -257,22 +263,23 @@ bool load_original_as(const char* dir, const std::vector<std::string>& imports) 
   }
   if (n_unknown) {
     logf("FATAL: %s imports %s from %s, which this proxy does not export (%d such name(s)) - not a version of the "
-         "game the mod was made for (build 24468913)",
+         "game the mod was made for (builds 24468913 and 11047294)",
          program(), unknown, kName, n_unknown);
     std::snprintf(g_failure, sizeof(g_failure),
                   "RE3CabbyCodes does not work with this version of Resident Evil 3.\n\n"
                   "The game asks its Steam DLL for %s, which the mod does not pass on: the mod was made for the "
-                  "current Steam version of the game (build 24468913), and this is another one.\n\n"
+                  "current Steam version of the game (build 24468913) and the dx11_non-rt beta (build 11047294), "
+                  "and this is another one.\n\n"
                   "To play with the mod: in Steam, right-click Resident Evil 3 and choose Properties > Betas, "
-                  "then None.\n"
+                  "then None (or dx11_non-rt).\n"
                   "To play without it: delete the mod's steam_api64.dll and rename steam_api64_orig.dll back to "
                   "steam_api64.dll.",
                   unknown);
     return false;
   }
   if (n_lacking) {
-    // Never the game's own DLL (it has everything the game imports): another
-    // game's, an older SDK's, or one from another version of this game.
+    // Never one of the game's own DLLs (either has everything either build
+    // imports): another game's, an older SDK's, or one from another version.
     logf("FATAL: %s lacks %s, which %s imports (%d of its %d Steam function(s) missing) - not the game's own "
          "Steam DLL (%s%s%s%s)",
          path, lacking, program(), n_lacking, static_cast<int>(imports.size()), about, stock ? ": " : "",

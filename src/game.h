@@ -525,6 +525,16 @@ struct EventTargets {
   // subscribes to each pustule's HitController as it awakes.
   uint32_t final_form = 0;       // escape.enemy.em9300.EsEm9300Think
   uint32_t knob_damage = 0;      // EsEm9300Think.onHitDamageKnob(DamageInfo): a pustule is hit
+  // The dx11_non-rt build makes the delegates above from their code - `lea r9,[code]`,
+  // which no exchanged pointer reaches - but for the player's two, which it makes
+  // from the player's vtable as a player starts (SurvivorCondition
+  // .entryDelegateHitController: slots onHitDamage and checkHitDamage). There God mode
+  // is hooked in PlayerCondition's vtable, and an enemy's hit heard at its Think
+  // instead (events.cpp) - found in both builds, hooked in that one only:
+  uint32_t think = 0, think_damage = 0;  // enemy.EnemyThinkBehavior.onHitDamage(DamageInfo): the hit applied (every Think)
+  // ... and the pustules' handler is made in EsEm9300Think.onThinkAwake, with nothing
+  // virtual on a pustule's hit: there each pustule's own frame is heard (weaken_knob).
+  uint32_t knob = 0, knob_update = 0;    // escape.enemy.em9300.EsEm9300Knob.update(): a pustule's frame
   // Virtual methods: hooked in the class's vtable, once the class is up.
   uint32_t fire = 0;             // Equipment.executeFire(WeaponType, int): a shot
   uint32_t save_data = 0;        // MainFlowManager.saveGameSaveData(): a save capturing the header (IGameSaveData)
@@ -566,10 +576,24 @@ inline int64_t lethal_hp(int32_t hp, int32_t damage, bool guts) {
   const int64_t left_at = guts ? static_cast<int64_t>(damage) + 1 : damage;
   return hp > left_at ? left_at : -1;
 }
+// The same once addDamage has run (the dx11_non-rt build, make_lethal_after): a
+// damaging hit left `hp`, and the HP to put in is what lethal_hp would have had
+// addDamage leave - 0, or 1 under GUTS_MODE. -1: nothing to write.
+inline int32_t lethal_hp_after(int32_t hp, int32_t damage, bool guts) {
+  if (damage <= 0 || hp <= 0) return -1;
+  const int32_t left = guts ? 1 : 0;
+  return hp > left ? left : -1;
+}
 // The same for one of the final form's pustules (its float life): the life to put
 // in first so that EsEm9300Knob.UpdateDamageLife (life less the damage, 0 at or
 // below it) bursts it on this hit, or -1.
 inline float burst_life(float life, float damage) { return damage > 0 && life > damage ? damage : -1.0f; }
+// The dx11_non-rt build, where a pustule is heard at its own frame rather than its
+// hit (weaken_knob): the life it is kept at while One hit kills is on - any hit of
+// that much or more bursts it, a hit of none (the fight guarding) takes nothing -
+// and whether a life is to be lowered to it (-1: at it, or below it, already).
+constexpr float kKnobSliver = 1.0f / 1024.0f;
+inline float knob_sliver(float life) { return life > kKnobSliver ? kKnobSliver : -1.0f; }
 
 // One hit kills. The enemy's HitPointController `hpc` (and its EnemyController,
 // 0 when unknown) is about to take the DamageInfo `info`: its HP is lowered to
@@ -583,6 +607,15 @@ inline float burst_life(float life, float damage) { return damage > 0 && life > 
 uintptr_t enemy_hit_points(uintptr_t enemy_controller);             // EnemyController.<HitPoint>
 bool reaction_targets(uintptr_t reaction, uintptr_t* hpc, uintptr_t* enemy);  // EnemyReactionController's
 int make_lethal(uintptr_t hpc, uintptr_t enemy, uintptr_t info, bool* to_floor = nullptr);
+// The same in the dx11_non-rt build, where the hit is heard after the game's own
+// addDamage - EnemyThinkBehavior.onHitDamage, which the enemy's hit handler calls
+// through the Think's vtable after addDamage and before its "was alive and is not:
+// dead()" - so the HP goes to 0 (to 1 under GUTS_MODE) rather than down to the
+// damage, before the Think's own onHitDamage sees it (lethal_hp_after). The same
+// holds as make_lethal's. `think` is the enemy's Think; think_controller its
+// EnemyController.
+uintptr_t think_controller(uintptr_t think);
+int make_lethal_after(uintptr_t hpc, uintptr_t enemy, uintptr_t info, bool* to_floor = nullptr);
 // One hit kills on the final form's pustules (NEST 2's last fight). They are not
 // enemies: each EsEm9300Knob has its own HitController and life, and the final
 // form's EsEm9300Think.onHitDamageKnob - the handler it subscribes to each one's
@@ -593,6 +626,20 @@ int make_lethal(uintptr_t hpc, uintptr_t enemy, uintptr_t info, bool* to_floor =
 // the game's own handler bursts it. Not for a hit that does none, or a pustule that
 // takes none (any state but Alive). The life it had, or -1; `knob_no` its KnobNo.
 float burst_knob(uintptr_t think, uintptr_t info, int* knob_no);
+// The same in the dx11_non-rt build, from the pustule's own frame (EsEm9300Knob.update:
+// no hook reaches its hit there). While One hit kills is on, an Alive pustule `knob`
+// is kept at a sliver of life (knob_sliver), so its next damaging hit bursts it - the
+// game's own UpdateDamageLife takes the hit's damage from it and bursts it at 0, as
+// burst_knob has it do - and the life it had is remembered. restore_knob puts that
+// back once the cheat is off - unless the game has set a life of its own since
+// (AllSetKnobLife: a new pattern of pustules), or a hit has burst it. Nothing else of
+// the fight reads a pustule's life (build 11047294: AllSetKnobLife, the accessors and
+// UpdateDamageLife are all the code that touches it). Each: the life it had (or has
+// back), -1 when nothing was written; `knob_no` its KnobNo.
+float weaken_knob(uintptr_t knob, int* knob_no);
+float restore_knob(uintptr_t knob, int* knob_no);
+bool knobs_weakened();     // a pustule's life is the mod's sliver (restore_knob has work)
+void forget_knob_marks();  // as a game session starts: the pustules remembered are the last scene's
 
 // God mode's floor (pure; tests/test_lethal.cpp). A player with `hp` is about to
 // take a hit of `damage`: the damage to put in so the hit leaves 1 HP, when it would

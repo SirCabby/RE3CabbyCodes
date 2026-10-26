@@ -162,7 +162,7 @@ def main():
     ap.add_argument("--game", required=True)
     ap.add_argument("--type", required=True)
     a = ap.parse_args()
-    tdb = TDB(PE(os.path.join(a.game, "re3.exe")))
+    tdb = TDB.open(PE(os.path.join(a.game, "re3.exe")))
     reader = Reader(tdb)
     fqn = reader.fqn(a.type)
     if fqn is None:

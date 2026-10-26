@@ -1,14 +1,17 @@
 // Offline test of src/switch_eval.h - running a compiled switch for an argument -
-// on the code in re3.exe read from disk (build 24468913; .text is plain on disk):
+// on the code in re3.exe read from disk (build 24468913, or the dx11_non-rt build
+// 11047294; .text is plain on disk):
 //
 //   x86_64-w64-mingw32-g++ -std=c++20 -O2 -static tests/test_switch.cpp -o tests/build/test_switch.exe
 //   wine tests/build/test_switch.exe 'Z:\...\re3.exe'
 //
 // The methods' code addresses only exist at run time (the database's code
-// pointers are 0 on disk), so this build's are named here, from
-// tools/tdb_dump.py --link. The expected answers were read out of the same code
-// by hand (the disassembly and its jump tables, decoded separately in Python),
-// so the evaluator is checked against an independent reading.
+// pointers are 0 on disk), so both builds' are named here, from
+// tools/tdb_dump.py --link, and the exe's type database says which build it is.
+// The expected answers were read out of build 24468913's code by hand (the
+// disassembly and its jump tables, decoded separately in Python), so the
+// evaluator is checked against an independent reading; the dx11_non-rt build's
+// code must give the very same answers (the game's data is the same in both).
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -26,6 +29,22 @@ void check(bool ok, const char* what) {
 }
 
 constexpr uint64_t kBase = 0x140000000;  // the image's preferred base: RIP-relative leas give it back
+
+// The methods run, by build (tools/tdb_dump.py --link).
+struct Rvas {
+  uint32_t multiple_use_max;  // ItemManager.getItemMultipleUseMax(Item.ID)
+  uint32_t disposable;        // ItemManager.getItemDisposable(Item.ID)
+  uint32_t category;          // EquipmentDefine.getCategory(WeaponType)
+  uint32_t item_of_bullet;    // EquipmentDefine.getItemID(Bullet)
+  uint32_t bullet_of_item;    // EquipmentDefine.getBulletType(Item.ID)
+  uint32_t broken;            // escape.gimmick.action.EsGimmickBobbingHead.Broken()
+  uint32_t set_unlock;        // GimmickDialLockManager.SetUnlockRecord(RecordDialLock)
+  uint32_t list_index;        // SaveDataManager.getSaveDataIndex(SaveMode, Int32)
+  uint32_t list_count;        // SaveDataManager.getSaveListCount(SaveMode)
+};
+constexpr Rvas kRt = {0x1B1E060, 0x1B1DCF0, 0x2362C00, 0x2363330, 0x2362B40, 0x22E3120, 0x2211F50, 0x1419810, 0x1419A60};
+constexpr Rvas kDx11 = {0x2023910, 0x2021B20, 0x1F5C610, 0x1F5DD00, 0x1F5DBD0, 0xB9CF30, 0x1D3B290, 0x17D7640, 0x17D76B0};
+Rvas g_rva = kRt;
 
 struct Image {
   std::vector<uint8_t> file;
@@ -68,6 +87,15 @@ struct Image {
       if (!std::strncmp(s.name, name, 8)) return &s;
     return nullptr;
   }
+  // The type database's version (70: build 24468913, 67: the dx11_non-rt build), 0 if none.
+  uint32_t tdb_version() const {
+    for (size_t at = 0; at + 8 <= file.size(); at += 8)
+      if (file[at] == 'T' && file[at + 1] == 'D' && file[at + 2] == 'B' && file[at + 3] == 0) {
+        const uint32_t v = u32(at + 4);
+        if (v == 70 || v == 67) return v;
+      }
+    return 0;
+  }
   // Bytes at a virtual address (kBase + RVA), from the section holding it.
   bool read(uint64_t va, uint8_t* out, size_t n) const {
     if (va < kBase) return false;
@@ -105,12 +133,15 @@ int main(int argc, char** argv) {
   }
   check(g_exe.load(argv[1]) && g_exe.section(".text"), "re3.exe read, .text found");
   if (!g_exe.section(".text")) return 1;
+  const uint32_t tdb = g_exe.tdb_version();
+  check(tdb == 70 || tdb == 67, tdb == 67 ? "TDB v67: the dx11_non-rt build 11047294" : "TDB v70: build 24468913");
+  g_rva = tdb == 67 ? kDx11 : kRt;
   char what[256];
 
   // ItemManager.getItemMultipleUseMax(Item.ID) - an instance method: the id is in r8.
   // A compare chain above 58 (78, 91, 97), a jump table over 31..43, a range check
   // for 57-58, and 1 for everything else.
-  constexpr uint32_t kMultipleUseMax = 0x1B1E060;
+  const uint32_t kMultipleUseMax = g_rva.multiple_use_max;
   struct Want {
     int id, max;
   };
@@ -146,7 +177,7 @@ int main(int argc, char** argv) {
   // rax,edx; lea rdx,[image]; movzx eax,byte [rdx+rax+cases]; mov ecx,
   // [rdx+rax*4+targets]; add rcx,rdx; jmp rcx`, cases `xor eax,eax; ret` or
   // `mov eax,imm32; ret`).
-  constexpr uint32_t kGetCategory = 0x2362C00;
+  const uint32_t kGetCategory = g_rva.category;
   uint8_t code[40] = {};
   const bool shape = g_exe.read(kBase + kGetCategory, code, sizeof(code)) && code[0] == 0xFF && code[1] == 0xCA &&
                      code[2] == 0x81 && code[3] == 0xFA && code[8] == 0x0F && code[9] == 0x87 && code[14] == 0x48 &&
@@ -185,7 +216,7 @@ int main(int argc, char** argv) {
 
   // Not a switch: ItemManager.getItemDisposable saves registers and calls the
   // dictionary's lookup - a store, so unknown.
-  check(!run(0x1B1DCF0, 8, 31, &v), "getItemDisposable (a store and a call): unknown");
+  check(!run(g_rva.disposable, 8, 31, &v), "getItemDisposable (a store and a call): unknown");
 
   // EquipmentDefine.getItemID(Bullet) - static: the kind is in rdx. A chain of
   // compares with `mov eax,imm; ret`, `lea eax,[rdx+imm]` cases and a run of
@@ -194,7 +225,7 @@ int main(int argc, char** argv) {
   // is a jump table over ids 31..45 of which 14 name a kind: each id's kind must
   // lead back to that very id, which pins both readings at once.
   {
-    constexpr uint32_t kItemIdOfBullet = 0x2363330, kBulletOfItemId = 0x2362B40;
+    const uint32_t kItemIdOfBullet = g_rva.item_of_bullet, kBulletOfItemId = g_rva.bullet_of_item;
     int pairs = 0, bad = 0;
     for (int id = 0; id < 0x400; ++id) {
       int32_t kind = 0, back = 0;
@@ -234,7 +265,7 @@ int main(int argc, char** argv) {
     // EsGimmickBobbingHead.Broken: `mov r8d,0x14; call clearRecord` ("Hello, Charlie!",
     // RECORD_021), then `mov r9d,1; lea r8d,[r9+0x17]; call addRecordCount` ("Goodbye,
     // Charlie!", RECORD_025: one more doll).
-    constexpr uint32_t kBroken = 0x22E3120;
+    const uint32_t kBroken = g_rva.broken;
     const int16_t clear[] = {0x41, 0xB8, -1, -1, -1, -1, 0xE8};
     const int16_t add[] = {0x41, 0xB9, 0x01, 0x00, 0x00, 0x00, 0x45, 0x8D, 0x41, -1, 0xE8};
     uint8_t b[16] = {};
@@ -247,7 +278,7 @@ int main(int argc, char** argv) {
   {
     // GimmickDialLockManager.SetUnlockRecord's tail: `test rcx,rcx; jne; test rdx,rdx; je;
     // lea r8d,[rcx+ID]` - rcx is the exception pointer, 0 there - then setRecordCount.
-    constexpr uint32_t kSetUnlockRecord = 0x2211F50;
+    const uint32_t kSetUnlockRecord = g_rva.set_unlock;
     const int16_t pat[] = {0x48, 0x85, 0xC9, 0x0F, 0x85, -1, -1, -1, -1, 0x48, 0x85, 0xD2, 0x74, -1,
                            0x44, 0x8D, 0x41, -1, 0x44, 0x8B, 0xCF, 0x48, 0x8B, 0xCB, 0xE8};
     uint8_t ids[25] = {};
@@ -260,10 +291,10 @@ int main(int argc, char** argv) {
   // getSaveListCount(SaveMode) - static, so the mode is in rdx and the offset in r8 - are
   // jump tables over the SaveMode (RE2's enum, kept). The main game's list (SCENARIO 1) is slots 0-20.
   {
-    constexpr uint32_t kIndex = 0x1419810, kCount = 0x1419A60;
+    const uint32_t kIndex = g_rva.list_index, kCount = g_rva.list_count;
     auto index = [](int mode, int offset, int32_t* out) {
       return re3cc::code::eval_switch(
-          kBase + kIndex, 2, static_cast<uint64_t>(mode),
+          kBase + g_rva.list_index, 2, static_cast<uint64_t>(mode),
           [](uint64_t at, uint8_t* o, size_t n) { return g_exe.read(at, o, n); }, in_text, in_image, out, 8,
           static_cast<uint64_t>(offset));
     };

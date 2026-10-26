@@ -5,13 +5,14 @@
 //   wine tests/build/test_proxy.exe 'Z:\...\re3.exe' 'Z:\...\steam_api64_orig.dll' ['Z:\...\steam_api64.dll' ...]
 //
 // First what re3.exe imports from steam_api64.dll: its delay-load table, read
-// from the image the loader maps, must give build 24468913's twelve names. Then
+// from the image the loader maps, must give either build's twelve names. Then
 // the original loaded from a folder the way DllMain loads it, once per Steam DLL
 // given - the game's own first, then any other (another game's, another SDK's):
 // with the game's twelve imports the load must succeed exactly when the DLL has
 // all twelve, and then every thunk must point at the original's function of its
 // name, or at the stub (answering 0) for one the original lacks; the log must
-// name the game's own as such and never call it the wrong file. It must fail,
+// name the game's own as such, whatever it lacks of the proxy's exports (the
+// dx11_non-rt beta's lacks 238), and never call it the wrong file. It must fail,
 // with the message for the player, when the program imports a name the proxy
 // does not export, and when there is no original; a steam_api64_orig.dll.dll
 // (the .dll typed twice) must do.
@@ -49,15 +50,24 @@ constexpr const char* const kNames[] = {
 #undef PROXY_NAME
 };
 
-// The delay-load table for steam_api64.dll, in its order (tools/gen_proxy.py
-// reads the same from the files): build 24468913's - the same twelve as RE2's.
-const std::vector<std::string> kGameImports = {
+// The delay-load tables for steam_api64.dll, in their order (tools/gen_proxy.py
+// reads the same from the files): build 24468913's - the same twelve as RE2's -,
+// and the dx11_non-rt build's, the same twelve in another order.
+const std::vector<std::string> kRtImports = {
     "SteamAPI_UnregisterCallback",   "SteamAPI_Init",
     "SteamAPI_RunCallbacks",         "SteamAPI_RestartAppIfNecessary",
     "SteamAPI_IsSteamRunning",       "SteamAPI_RegisterCallResult",
     "SteamAPI_UnregisterCallResult", "SteamInternal_FindOrCreateUserInterface",
     "SteamAPI_RegisterCallback",     "SteamInternal_ContextInit",
     "SteamAPI_Shutdown",             "SteamAPI_GetHSteamUser"};
+const std::vector<std::string> kDx11Imports = {
+    "SteamAPI_RunCallbacks",          "SteamAPI_RegisterCallback",
+    "SteamAPI_UnregisterCallback",    "SteamInternal_FindOrCreateUserInterface",
+    "SteamInternal_ContextInit",      "SteamAPI_Shutdown",
+    "SteamAPI_RestartAppIfNecessary", "SteamAPI_IsSteamRunning",
+    "SteamAPI_UnregisterCallResult",  "SteamAPI_RegisterCallResult",
+    "SteamAPI_Init",                  "SteamAPI_GetHSteamUser"};
+std::vector<std::string> kGameImports;  // whichever the exe given has
 
 std::string g_root;  // the scratch folder, with a trailing separator
 int g_folders = 0;
@@ -102,7 +112,9 @@ void imports_of_the_game(const char* exe) {
     return;
   }
   const std::vector<std::string> got = mem::imported_names(m, "steam_api64.dll");
-  check(got == kGameImports, "its delay-load table: build 24468913's twelve");
+  kGameImports = got == kDx11Imports ? kDx11Imports : kRtImports;
+  check(got == kRtImports || got == kDx11Imports,
+        got == kDx11Imports ? "its delay-load table: the dx11_non-rt build's twelve" : "its delay-load table: build 24468913's twelve");
   check(mem::imported_names(m, "STEAM_API64.DLL") == got, "the DLL's name matched without case");
   bool filter = false;
   for (const std::string& n : mem::imported_names(m, "kernel32.dll")) filter |= n == "SetUnhandledExceptionFilter";
@@ -132,11 +144,14 @@ void original(const char* dll, bool the_games) {
   const bool loaded = proxy::load_original_as(folder(dll, "steam_api64_orig.dll").c_str(), kGameImports);
   check(loaded == (lacks_imported == 0), "loads with the game's imports exactly when it has all of them");
   if (the_games) {
-    // The game's own DLL is named as such: a player reads this log, and
-    // RE2CabbyCodes 1.0.1/1.0.2 once called a right file "not the Steam DLL the
-    // mod was made for" (2026-09-24).
+    // Either version's own DLL is named as such, whatever it lacks of the
+    // proxy's exports (the dx11_non-rt beta's lacks 238): a player reads this
+    // log, and RE2CabbyCodes 1.0.1/1.0.2 called its beta's own "not the Steam DLL
+    // the mod was made for" (2026-09-24).
     const std::string said = log_since(before);
-    check(said.find("current version's own") != std::string::npos, "the log names it as the game's own Steam DLL");
+    check(said.find("current version's own") != std::string::npos ||
+              said.find("dx11_non-rt beta's own") != std::string::npos,
+          "the log names it as the game's own Steam DLL");
     check(said.find("not a Steam DLL the game ships") == std::string::npos &&
               said.find("made for") == std::string::npos,
           "and never calls it the wrong one");

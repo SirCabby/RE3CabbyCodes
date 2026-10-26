@@ -1,4 +1,4 @@
-// The mod's own discovery run against a real re3.exe, offline:
+// The mod's own discovery run against a real re3.exe, offline - either build:
 //
 //   python3 tools/tdb_dump.py --exe "$GAME_DIR/re3.exe" --write-methods <scratch>/methods.bin
 //   make tests/build/test_discover.exe   (or: every build/*.o but dllmain.o, the imgui objects, the mod's libs)
@@ -14,7 +14,8 @@
 // events::install, app::find and the save files' first tick run exactly as the mod
 // thread runs them, over the real code: the VM global, the stacks' and the ammo's
 // switches, the records' patterns, the call bridge's helpers, the hooked methods'
-// entries, the frame's entry table, the save list's getters and refresh. A stand-in VM object
+// entries (the dx11_non-rt build's hook points), the frame's entry table, the save
+// list's getters and refresh. A stand-in VM object
 // (the database pointer, an empty static table 0x30 before it) sits in the VM global. What cannot be
 // seen offline is what the running game builds - the VM object, static data,
 // runtime vtables, the frame's entry table - and the log says so for those.
@@ -74,26 +75,26 @@ int main(int argc, char** argv) {
   for (uintptr_t a = (data.begin + 7) & ~static_cast<uintptr_t>(7); a + 8 < data.end; a += 8) {
     if (std::memcmp(reinterpret_cast<const void*>(a), "TDB\0", 4)) continue;
     version = mem::read<uint32_t>(a + 4);
-    if (version == 70) {
+    if (version == 70 || version == 67) {
       tdb = a;
       break;
     }
   }
   if (!tdb) {
-    std::printf("no TDB v70 in %s\n", argv[1]);
+    std::printf("no TDB v70 or v67 in %s\n", argv[1]);
     return 1;
   }
   DWORD old = 0;
   VirtualProtect(reinterpret_cast<void*>(data.begin), data.size(), PAGE_READWRITE, &old);
-  const int first_array = 0x58, arrays = 18;
+  const int first_array = version == 70 ? 0x58 : 0x48, arrays = version == 70 ? 18 : 13;
   for (int i = 0; i < arrays; ++i) {
     auto* p = reinterpret_cast<uint64_t*>(tdb + first_array + 8 * i);
     if (*p) *p += tdb;
   }
   // Every method's code, as the VM links it.
-  const uintptr_t methods = mem::read<uint64_t>(tdb + 0x70);
+  const uintptr_t methods = mem::read<uint64_t>(tdb + (version == 70 ? 0x70 : 0x58));
   const uint32_t n_methods = mem::read<uint32_t>(tdb + 0x10);
-  const uint32_t stride = 16, code_at = 8;
+  const uint32_t stride = version == 70 ? 16 : 32, code_at = version == 70 ? 8 : 0x18;
   FILE* f = std::fopen(argv[2], "rb");
   uint32_t header[4] = {};
   if (!f || std::fread(header, sizeof(header), 1, f) != 1 || header[0] != 0x4D334552 || header[2] != n_methods) {

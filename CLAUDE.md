@@ -1,7 +1,8 @@
 # RE3CabbyCodes — project guide
 
 A client-side mod for **Resident Evil 3 (2020)** — Steam app 952060, 64-bit RE Engine `re3.exe` (build
-24468913, the 2022 update's: TDB v70, Direct3D 11 or 12 by the game's own option) — cross-built on
+24468913, the 2022 update's: TDB v70; and the `dx11_non-rt` beta's build 11047294, TDB v67 - see The
+dx11_non-rt build -, Direct3D 11 or 12 by the game's own option) — cross-built on
 Linux with mingw-w64. It is **RE2CabbyCodes ported to RE3**: the same proxy DLL, the same panel beside
 the **pause menu** - God mode, One hit kills, Infinite ammo, Save without counting, save-count,
 play-time and death-count editors, Freeze play time (with the rank the time earns), Item box without
@@ -15,7 +16,7 @@ adoption of DXGI objects, the save service, why each design is the way it is - i
 `../RE2CabbyCodes/CLAUDE.md`'s: RE3 runs the same engine code, and this repo's sources are that repo's,
 ported. Dated incidents in the code's comments (player reports, crashes, 1.0.x releases) happened there.
 
-## Status (2026-10-13)
+## Status (2026-10-22)
 
 Built and checked offline (everything below was established from `re3.exe` and the game's archives on
 disk: the type database, the code, the user data (RSZ) and the text; `tests/test_discover.cpp` runs the
@@ -77,7 +78,15 @@ never run on Windows. Its Windows-only paths are RE2CabbyCodes', the code that m
 RE mods (the Steam overlay, DXGI wrappers, REFramework, the exit), and they were audited offline that day, with
 three fixes: the frame hook beside REFramework's, the ini's write-back beside a virus scanner, swapped mouse
 buttons. What stays open on Windows is listed under Windows below. What only the running game can show is
-listed under In-game checks below.
+listed under In-game checks below. Reported 2026-10-22 (the user: "I'm told this mod does not work on the
+non-RT version of the game. We had this same issue with RE2 remake's mod"): the mod refused the
+`dx11_non-rt` beta - its database is v67 - by design. It reads that build now (The dx11_non-rt build below):
+the v67 layout in `re.cpp` and `tools/tdb_dump.py`, RE2CabbyCodes' non-RT save files, and the hit hooks at
+the points that build leaves reachable - God mode in the player's vtable and One hit kills at every enemy's
+Think, RE2CabbyCodes' approved counterparts, and the final form's pustules at their own frame (approved
+that day). Built and checked offline against the branch's files - the user switched this machine's install
+to the branch that day (20:51), and the RT build's `re3.exe` and Steam DLL were kept aside for the tests -,
+not yet run in game. The game on this machine is on the beta since, the mod installed there.
 
 ## Build, tools, tests
 
@@ -114,7 +123,9 @@ bash -c 'x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX 
 WINEPREFIX=<scratch> wine tests/build/test_discover.exe 'Z:\...\re3.exe' 'Z:\...\methods.bin'
 ```
 
-`test_keyboard` and `test_adopt` build and run as in RE2CabbyCodes (their headers). Results on
+`test_keyboard` and `test_adopt` build and run as in RE2CabbyCodes (their headers). `test_re`, `test_switch`,
+`test_savefiles`, `test_discover`, `test_app` and `test_proxy` take either build's exe and tell which it is by
+its database's version (The dx11_non-rt build). Results on
 2026-10-09: all pass - `test_re` 224 checks, `test_switch` every compiled switch the mod evaluates
 (item stacks for ids -2..1023, weapon categories 1..312, the 14 ammo items both ways, the save list's
 modes) against an independent decode, `test_proxy` with RE3's own Steam DLL and two other games'. On
@@ -145,7 +156,14 @@ above passes against the current DLL - `test_adopt` 34 checks (the swap chain ha
 still makes a device), `test_re` 250, `test_proxy` 26 (RE3's Steam DLL and three other games'),
 `test_input` 15, `test_keyboard` 20 both ways, `test_config` with the held-file checks, `test_discover` 0
 names missing with re3.exe mapped at 0x7FFFF0C10000 and the stand-in VM at 0x7FFFFB380000 (Windows' range,
-Windows below) - and the new `test_app` 19 checks.
+Windows below) - and the new `test_app` 19 checks. On 2026-10-22 (the dx11_non-rt build; both builds' exes,
+the RT one from a copy kept while the install was on the beta, in a null-graphics prefix): every test passes
+on both - `test_re` 250 checks each, `test_switch` the same answers on both builds' code (the RT build's are
+decoded by hand), `test_savefiles` with the beta's own checks (its native texts, the field-write refresh, the
+save screen), `test_discover` 0 names missing on both, `test_app` 19 and `test_proxy` 27 checks on each
+exe (with each build's Steam DLL and DARK SOULS REMASTERED's; RE4's newer DLL hangs Wine's loader, left out),
+`test_load` and `test_adopt` with the beta's Steam DLL as the original, `test_lethal` with the after-damage
+rule and the pustules' sliver; the rest unchanged.
 
 ## ⛔ Rules
 
@@ -154,10 +172,13 @@ RE2CabbyCodes' rules hold here unchanged:
 - **Never patch `re3.exe` on disk.**
 - **Never use absolute addresses or hard-coded field offsets in code.** Every class, field, enum value
   and singleton is looked up by name in the type database at run time; the offsets and addresses in
-  this file document build 24468913 only. The one constant the code holds that is not data is the item
+  this file document build 24468913 (the dx11_non-rt build's 11047294 in its own section). The one
+  constant the code holds that is not data is the item
   box record's 0 (below) - a compiled constant of the game's check, not a layout.
 - **Game memory only from the game tick or an event hook** (`dispatch.cpp`, `events.cpp`), never every
-  frame but the tick's one main-state read - with one exception RE3 forces, below (the counters).
+  frame but the tick's one main-state read - with one exception RE3 forces, below (the counters), and one
+  the dx11_non-rt build does (the final form's pustules' frames, while One hit kills is on: The dx11_non-rt
+  build).
 - **Game functions only where approved** - the same calls and the same kinds of hook RE2CabbyCodes' user
   approved, at RE3's counterparts: the item box's Take/Store and the inventory editor's weapons
   (`InventoryManager.setStock/removeStock/putShortcutWeapon/updateInventoryFlags`, `Inventory.unequipSlot`,
@@ -185,7 +206,13 @@ RE2CabbyCodes' rules hold here unchanged:
   `enemy.em0000.fsmv2.condition.Em0000MFsmCondition_ReservedKillTarget.doEvaluate` and
   `enemy.em3000.fsmv2.condition.Em3000FsmCondition_CheckPlayerKill.doEvaluate` (each answering no while God
   mode is on) and `escape.enemy.common.fsmv2.action.EsEnemyMFsmAction_GrappleBranch.OnStart` (the struggle
-  prompt shown again).
+  prompt shown again). The dx11_non-rt build (2026-10-22): RE2CabbyCodes' user approved for its own non-RT
+  build (2026-09-24) hearing the hit handlers it makes with `lea` at virtual methods - God mode's two in
+  PlayerCondition's vtable, One hit kills at `EnemyThinkBehavior.onHitDamage` in every Think class's vtable -
+  and those are used here at RE3's counterparts; approved 2026-10-22 (the user chose "Pustule frame hook"
+  over leaving the pustules to the game or retargeting their delegate): a vtable hook on
+  `escape.enemy.em9300.EsEm9300Knob.update` keeping an Alive pustule's `_Life` at a sliver while One hit
+  kills is on, and putting back what it lowered once the cheat is off - field writes only, no call.
 - **Never `VirtualQuery` per read** (`mem.cpp`'s guarded copies).
 - **Never add, remove or move a weapon by field writes** - only through the game's inventory calls; a
   weapon is built in an empty item box entry and handed to `setStock`. (RE2CabbyCodes' repair of its own
@@ -206,9 +233,11 @@ derive from `offline.RopewaySingletonBehaviorRoot`1<T>` (RE2's name, kept) or
 fields start at +0x50 in the object (the database's offsets are from there). So the port is mostly
 names (`app.ropeway` -> `offline`), plus:
 
-- **TDB 70 only.** RE2's `dx11_non-rt` layout (TDB 66) and every code path for it (the save files'
-  native texts and field-write refresh, the 2016 Steam DLL) are gone. RE3's own `dx11_non-rt` beta and
-  the 2020 release carry an older database; the mod says so and leaves them alone.
+- **TDB 70 and 67.** RE3's own `dx11_non-rt` beta carries TDB 67, not RE2's beta's 66: it is read as its
+  own layout (The dx11_non-rt build), and RE2CabbyCodes' code paths for its beta came back where RE3's beta
+  needs them (the save files' native texts and field-write refresh, the hooks heard at virtual methods).
+  RE2's 2016 Steam DLL is not RE3's beta's (a 2019 one). The 2020 release's database is neither; the mod
+  says so and leaves it alone.
 - **Dropped cheats** (nothing to act on): Save without ink ribbons (no ink ribbons - typewriters save on
   every difficulty), Infinite wooden boards (no boards, no windows to board), No durability loss (RE3's
   knives are main-slot weapons with a count of 1000 that never wears), Freeze countdown timer (the only
@@ -223,6 +252,119 @@ names (`app.ropeway` -> `offline`), plus:
 - **Records** are one set (no Ghost Survivors), with **Shop points**; two rewards open the harder modes;
   two records count from system-save tallies (Charlie dolls, locks).
 - **The Shop** is new (the mod had a panel beside it until 2026-10-12, and leaves it alone now).
+
+## The dx11_non-rt build (11047294, TDB 67)
+
+Steam's app info (`appcache/appinfo.vdf` v29) lists two branches of 952060: `public` 24468913 and
+**`dx11_non-rt` 11047294** (built 2023-04-20) - the game before its 2022 ray-tracing update, Direct3D 11 or 12
+all the same (it delay-loads d3d12). Depot 952062's manifest 4250078460962883141; `re3.exe` 152 758 680 bytes,
+linked 2023-04-20 (SHA-256 `f7f70774...30a30`), `.bind` (SteamStub) holding the entry point, `.text` plain on
+disk. Players use it for older mods and REFramework's TDB67 build. Supported since 2026-10-22; what differs,
+found offline:
+
+- **Its Steam DLL**: 288 032 bytes, linked 2019-02-18, 941 exports (SHA-256 `e61ac9a9...99150`). It lacks 238 of
+  the proxy's 1018 (stubbed, answering 0) and has the 160 old-SDK call-result helpers the RT DLL lacks (none
+  imported). The exe delay-loads the RT build's twelve names in another order (`test_proxy`). `kStock` names
+  it, so the log calls it the beta's own. A branch switch puts the branch's DLL in place of the mod's, and
+  `make install` makes whichever stock one is live the original. Either DLL has all twelve, so a
+  `steam_api64_orig.dll` left from the other branch loads too. The readmes still say to delete it after a
+  switch: that keeps each build on its own DLL.
+- **TDB 67** (`re.cpp`; `tools/tdb_dump.py` class TDB67; REFramework's `tdb67::TDB` and
+  `RETypeDefVersion67_RE3` - not DMC5's 0x78 `RETypeDefVersion67`). Header at exe+0x58F1940: TDB 66's,
+  counts at 0x0C (81 386 types, 554 206 methods, 122 170 fields, 119 257 properties, 225 events, params 0x24,
+  **init data 0x28** (3 574), ? 0x2C, intern strings, modules, dev/app entry, strings 0x40, bytes 0x44) and 13
+  array offsets from 0x48 (types 0x50, methods 0x58, fields 0x60, properties, events, -, params 0x80, **init
+  data 0x88**, ? 0x90, strings 0x98, bytes 0xA0, intern 0xA8). The records:
+  - **typedef 0x80**: index:17 ?:13 parent:17 declaring:17 in the first qword; name +0x18, namespace +0x1C, flags
+    +0x20, object type u8 +0x26, field size +0x2C; plain u32s for the members (first method +0x38, count +0x3C,
+    first field +0x40, count +0x44); properties {num:12 first:19} +0x48, interfaces +0x50, generics +0x58,
+    vt +0x5C; run-time pointers +0x68, +0x70 and the REObjectInfo +0x78. No file shows that last one set, so
+    `re::managed_vt` takes it (both builds) only when its first qword points back at the typedef - what
+    `type_of` reads off every object.
+  - **field 0x18**: declaring:17 type:17; name +8, flags +0xC, init index +0xE, offset +0x10.
+  - **method 0x20**: declaring:17 invoke:16 params:6 ?:8 return:17; vtable index +0xA, name +0xC, flags +0x10,
+    impl flags +0x12, parameters +0x14 (a byte-pool list of 8-byte {type:17 flags:16 name:31}), **the code
+    +0x18**.
+  - generic arguments {definition:17 num:14; u32 types[]}.
+  - The array sizes fix it: 81 386 x 0x80, 554 206 x 0x20 and 122 170 x 0x18 fill their arrays exactly, and
+    0x28's count x 4 fills 0x88's array (16-byte aligned).
+  - **5 747 array types (object type 2) have no name of their own** (one is the self-check's middle probe,
+    which now passes over arrays). The mod looks up no array type by name.
+  - Link records are TDB 66's 0x48 bytes: 425 836 methods' code.
+- **`re::init`** let go of a database that fails its checks only since this build: `attach` kept `g.base`,
+  so the next poll took it for attached, with no names built. The first `test_discover` run said `ready`, then
+  every class `not found`. Now `attach` clears `g` on a failure.
+- **The engine**: the VM global exe+0x8BC5BF8 (the same pattern), the Application global exe+0x8BC5C08, the
+  entry table filled at exe+0x2264500 (count +0x3FC, table +0x858, 0xD0-byte entries - `app.cpp` reads them
+  out of the code, `test_app`); the call bridge's helpers by the same patterns (get_thread_context
+  exe+0x227BA40, begin frame exe+0x2276340, exception handler exe+0x22783E0, local frame gc exe+0x2277470, end
+  frame exe+0x22768B0), the same context offsets.
+- **Names and values** (`test_re`'s 250 checks on both builds):
+  - The main state is `<MainStateValue>k__BackingField` +0x88 (`get_MainStateValue` reads `[rdx+0xD8]`); RT has
+    `_CurrentMainState` +0x90, and `game.cpp` tries both.
+  - `gameHeaderSaveData` +0x148; RecordManager's `RecordIdList` +0xB8, `RecordDataList` +0xC0, `RewardDataList`
+    +0xC8 (RT +0xC0/+0xC8/+0xD0).
+  - `MainState` still has RE2's Ghost Survivors states (36 values; IN_GAME 6, PAUSE 9, TITLE 3 as in RT).
+  - `SaveLoadStep` has no transfer or PS5 steps (errors from 5): the idle steps are INITIALIZE and REQUEST_WAIT.
+  - Virtual slots move by one here and there - a behaviour's `update` 14 (RT 15), `EnemyThinkBehavior
+    .onHitDamage` 76 (RT 77) - and are always the database's.
+  - Everything else the mod reads has the RT build's name and offset. The compiled switches give the RT build's
+    answers (`test_switch`). `tools/gen_items.py` and `gen_records.py` write the same `items.h` and
+    `records_text.h` from this build's archives.
+- **Delegates are made from the code**, as in RE2's beta: `mov rdx,[type]; lea r9,[code]; mov r8,this; call`
+  the new-delegate helper exe+0x22779E0. That covers `EnemyController.HitController_OnHitDamage` (exe+0x8ED7F0,
+  made at exe+0x8D1EFB and 0x8D30A6), `EnemyReactionController.onHitDamage` (exe+0xB87760; exe+0xB8334D) and
+  `EsEm9300Think.onHitDamageKnob` (exe+0x7465C0; in `onThinkAwake` exe+0x742532, and `Nemesis3_DeadState`
+  exe+0x744EEF to take it off). No global, no read of a database entry. The player's two are made from the
+  object's vtable, in `SurvivorCondition.entryDelegateHitController` (exe+0x13D7050): `mov rax,[rdi]; mov
+  rcx,[rax-0x10]; mov r9,[rcx+0x148]` (onHitDamage, slot 41) and `[rcx+0x160]` (checkHitDamage, slot 44). So
+  (events.cpp, install):
+  - **God mode**: vtable hooks in `PlayerCondition`'s own table, slots 41 and 44 - "captured", so the mod
+    thread services every 100 ms until they are in (`events::pending`, as RE2's), before a player starts.
+  - **One hit kills**: `EnemyThinkBehavior.onHitDamage` (virtual[76]) in all 68 Think classes' vtables (a
+    family, RE2's). The enemy's handler runs `addDamage` (exe+0x8ED95D), then the Think's `onHitDamage`
+    through its vtable (`call [r9+0x260]`, exe+0x8EDEF5), then `get_IsLive` (`!DEAD && (NoDead || HasVital)`)
+    and `dead()` (exe+0x8EE26D) when the enemy was alive and is not. The hook comes before the Think's own
+    code. `make_lethal_after` puts the HP to 0 and sets `<IsKill>`, or to 1 under GUTS_MODE (`lethal_hp_after`),
+    and leaves STOP_DAMAGE alone. `test_lethal`: the same HP left as the RT write, for HP 1..600 x damage
+    -3..700. Nemesis's second form still ends its three stages in three shots: his Think's own `onHitDamage`
+    moves them on from the 1. The reaction's hook is lost here, as in RE2's beta.
+  - **The pustules**: nothing virtual is on a pustule's hit - `UpdateDamageLife` is a direct call from
+    `onHitDamageKnob` (exe+0x746A1E). So the pustule's own frame is hooked instead: `EsEm9300Knob.update`
+    (virtual[14]; approved 2026-10-22).
+    - While One hit kills is on, an Alive pustule's `_Life` is kept at 1/1024 (`kKnobSliver`, `weaken_knob`).
+      `UpdateDamageLife` acts only while `NowState` (+0x68 in the object) is Alive: life = (double)life -
+      (double)damage, and anything not above 0 becomes 0. `onHitDamageKnob` then bursts a life at or below 0.
+      So any damaging hit bursts it, and a hit of none (the fight guarding) takes nothing.
+    - The lives it lowered are remembered (32 marks, under a lock: the frames may run on several threads).
+      Each is put back on the pustule's next frame once the cheat is off, if it still holds the sliver. They
+      are forgotten as a game starts.
+    - Nothing else reads a pustule's life. In `EsEm9300Think` and `EsEm9300Knob` only `AllSetKnobLife`, the
+      accessors and `UpdateDamageLife` touch `_Life`. The damage material (`UpdateDamageRateValue`) animates a
+      value of its own (+0x98).
+    - The second per-frame read the rules allow: two fields a pustule, up to eight pustules, only in that
+      fight and only while the cheat is on. With the cheat off it is an atomic load, and the put-backs.
+  - Every other hooked method is the same by name, and in both builds each is reached only through its
+    class's vtable: no direct call to any (a scan of `call`/`jmp` rel32 to each one's code).
+- **Save files**, as in RE2's beta:
+  - `SaveFileDetail`'s texts are the engine's own UTF-16 strings (+0x18/+0x38/+0x58, length +0x18, capacity
+    +0x1C, inline below 12; `savefiles_rules.h`, `native_text_getter`), the stamp +0x78, no `UseSize`.
+  - There is no `SaveService.updateSaveFileDetailTbl`. `getSaveFileDetailList` (exe+0x17D7190) calls the native
+    refresh (exe+0x2AEB340) with the service (`[exe+0x8BC5B00]`) when the current user is not
+    `<LastDetailUserIndex>` (+0x48). That refresh skips a table it thinks fresh by its counter at +0x74. The mod
+    writes both to -1 (`find_list_refresh`, RE2's).
+  - The two screens' fields and code are the RT build's: `SaveBehavior.doAwake` sets `SaveDataIndexMin` 1,
+    its `getSaveListCount` is the manager's less one, and the update sets `IsSaved` at exe+0xBD4457
+    (`test_savefiles`).
+  - Steam's remote storage: the 2019 DLL has no `SteamAPI_SteamRemoteStorage_v014`, so the client's path
+    (RE2's) gets it.
+- **Imports**:
+  - `dxgi.dll`: `CreateDXGIFactory1` alone (RT: 1 and 2); the overlay hooks what is there.
+  - `d3d11.dll` `D3D11CreateDevice`; `d3d12.dll` delay-loaded; `DINPUT8.dll`.
+  - user32: every function the input guard hooks, and `SetWindowsHookExW` twice - `WH_CBT` (5) for its own
+    thread, its dialogs, not a keyboard hook.
+- **The tests** take either exe and tell the build by its database's version. While the install is on one
+  branch, the other build's files have to come from a copy - this session kept them in its scratchpad.
 
 ## Windows (audited offline 2026-10-13; never run there)
 
@@ -281,6 +423,15 @@ that code, renamed. Checked for RE3:
   ("access denied", a sharing violation). Since 2026-10-13 it is tried 5 times, 100 ms apart, on the mod
   thread; then the ini is left as it was and the log says so (`test_config` holds the file a moment, then
   longer).
+- **The dx11_non-rt build** (audited offline 2026-10-22):
+  - It imports `CreateDXGIFactory1` alone from dxgi, hooked as the RT build's two are.
+  - Its new hooks are slots of the game's managed vtables (heap copies), in no table the Steam overlay reads:
+    the player's, the Thinks', the pustules'.
+  - Its players run REFramework's TDB67 build, whose frame stubs go into via.Application's entries as the
+    TDB70 build's do (`test_app` on that exe).
+  - Its 2019 Steam DLL serves as the original (`test_proxy`, `test_load`).
+  - Its database's pointers are read as `uintptr_t`, the same as TDB 70's, with no assumption about where
+    the image or the heap lies.
 - **Open on Windows**:
   - **What is typed into a panel field reaches the game's DirectInput keyboard** - the pause menu behind
     the panel - as in RE2 on Windows (its log line: `keyboard: Windows - the panel takes keys from the
@@ -901,3 +1052,30 @@ into further.
    game) no crash. With REFramework: its menu works, and the log has `app: another tool put its own
    function (... (no module)) into UpdateBehavior's entry after the mod` (or `... already holds another
    tool's function`), the panel's figures still moving (the tick goes on).
+21. The dx11_non-rt build (The dx11_non-rt build above; the install is on that branch since 2026-10-22; back up
+   the save folder first). Run it with `Trace = 1`.
+   - **The log at start-up**:
+     - `re: TDB v67 header in .data at exe+0x58F1940 (the dx11_non-rt build)`.
+     - `re: VM ..., static table at VM+0x...` - REFramework puts the table 0x30 before the database pointer;
+       does that hold, or does the fallback search find it?
+     - `game: discovery done (0 name(s) missing)` and `proxy: ... is the dx11_non-rt beta's own Steam DLL`.
+     - `events: SurvivorCondition.checkHitDamage (God mode) hooked in 1 slot(s) of
+       offline.survivor.player.PlayerCondition's tables`, and `PlayerCondition.onHitDamage` the same, **before
+       a game is loaded**. They are read into the player's delegates as it starts; a hook in after that is
+       God mode doing nothing until the next area.
+     - `EnemyThinkBehavior.onHitDamage (One hit kills, the dx11_non-rt build) hooked in N more vtable(s)` as
+       the classes come up.
+     - `save files: the game's code read: ... (the engine's own UTF-16 ...) ... by field writes`.
+   - **In play**:
+     - The panel at the pause menu, with the game on DX11 and on DX12. Every `events:` vtable hook's first
+       call is logged.
+     - God mode heals every hit.
+     - One hit kills: a zombie dies on its first damaging hit (`one hit kills: enemy ... (its Think)`). Does
+       its death look right with `<IsKill>` set after its reaction ran? Nemesis goes down in a chase. The
+       NEST 2 tank fight takes three shots.
+     - In the final fight (`EsEm9300Knob.update ... hooked` as it starts), each pustule's line `kept at a
+       sliver of its N life`, then one shot bursts it. One hit kills switched off mid-fight gives the lives
+       back (`has its N life back`), and a pustule then takes its usual shots.
+     - The save files: rows with their texts, a Delete and a Copy, each in the game's list at once (the
+       field-write refresh).
+     - The records panel; the difficulty switch; a save and a load.

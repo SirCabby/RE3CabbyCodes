@@ -236,6 +236,8 @@ DWORD WINAPI mod_thread(LPVOID) {
         app::log_rates();
       }
       if (re_state == Re::Ready) events::service();  // vtable hooks as their classes come up
+    } else if (re_state == Re::Ready && events::pending()) {
+      events::service();  // some still waiting: every 100 ms (events.h)
     }
     Sleep(100);
   }

@@ -9,8 +9,9 @@
 // against them - and, given re3.exe, the getters' code the mod reads
 // SaveFileDetail's and System.String's layout out of, and what a typewriter's
 // save screen shares with the Load Game screen (one list, shown from slot 1;
-// IsSaved through its own save), at build 24468913's method RVAs
-// (tools/tdb_dump.py --link; the database's code pointers are 0 on disk).
+// IsSaved through its own save), at build 24468913's or the dx11_non-rt build
+// 11047294's method RVAs, whichever exe it is (tools/tdb_dump.py --link; the
+// database's code pointers are 0 on disk).
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -66,7 +67,113 @@ struct Image {
       }
     return false;
   }
+  // The type database's version (70: build 24468913, 67: the dx11_non-rt build), 0 if none.
+  uint32_t tdb_version() const {
+    for (size_t at = 0; at + 8 <= file.size(); at += 8)
+      if (file[at] == 'T' && file[at + 1] == 'D' && file[at + 2] == 'B' && file[at + 3] == 0) {
+        const uint32_t v = u32(at + 4);
+        if (v == 70 || v == 67) return v;
+      }
+    return 0;
+  }
 };
+
+// The dx11_non-rt build 11047294 (tools/tdb_dump.py --link): what the mod reads out of
+// its code - the engine's own detail texts, no sizes, the list re-read by field
+// writes (savefiles.cpp, find_list_refresh) - and the typewriter's save screen
+// sharing the Load Game screen's list, as in build 24468913.
+int non_rt(const Image& img) {
+  char what[256];
+  struct Getter {
+    const char* name;
+    uint32_t rva;
+    bool wide;
+    int32_t want;
+  };
+  const Getter getters[] = {
+      {"SaveFileDetail.get_Slot [65953]", 0x2404E0, false, 0x10},
+      {"SaveFileDetail.get_LastUpdateTimeStamp [65954]", 0x283E00, true, 0x78},
+      {"String.get_Length [306626]", 0x2404E0, false, 0x10},
+  };
+  for (const Getter& g : getters) {
+    uint8_t b[10] = {};
+    const int32_t got = img.read(g.rva, b, sizeof(b)) ? rules::getter_offset(b, sizeof(b), g.wide) : -2;
+    std::snprintf(what, sizeof(what), "%s (exe+0x%X) reads +0x%X (got %d)", g.name, g.rva, g.want, got);
+    check(got == g.want, what);
+  }
+  const struct {
+    const char* name;
+    uint32_t rva;
+    int32_t want;
+  } texts[] = {{"get_Title [65947]", 0x139F280, 0x18}, {"get_SubTitle [65949]", 0x139F380, 0x38},
+               {"get_Detail [65951]", 0x139F4A0, 0x58}};
+  for (const auto& g : texts) {
+    uint8_t b[64] = {};
+    rules::NativeText t;
+    const bool ok = img.read(g.rva, b, sizeof(b)) && rules::native_text_getter(b, sizeof(b), &t) && t.offset == g.want &&
+                    t.length == 0x18 && t.capacity == 0x1C && t.inline_below == 12;
+    std::snprintf(what, sizeof(what),
+                  "SaveFileDetail.%s (exe+0x%X): the engine's own UTF-16 at +0x%X (length +0x18, capacity +0x1C, inline "
+                  "below 12)",
+                  g.name, g.rva, g.want);
+    check(ok, what);
+  }
+  uint8_t b[48] = {};
+  int32_t c = 0;
+  check(img.read(0x2E1440, b, 6) && rules::getter_constant(b, 6, &c) && c == INT32_MIN,
+        "SaveFileDetail.get_InvalidSlot [65956] (exe+0x2E1440) is 0x80000000");
+  check(img.read(0x540B60, b, sizeof(b)) && rules::chars_offset(b, sizeof(b)) == 0x14,
+        "String.get_Chars [306631] (exe+0x540B60): characters at +0x14");
+  const uint8_t empty[] = {0x81, 0x7A, 0x10, 0x00, 0x00, 0x00, 0x80};
+  check(img.read(0x139F760, b, sizeof(empty)) && std::memcmp(b, empty, sizeof(empty)) == 0,
+        "SaveFileDetail.get_EmptyData (exe+0x139F760) compares the slot (+0x10) with 0x80000000");
+  auto rel32 = [&img](uint32_t at) -> uint32_t {  // where the call or jump at `at` goes
+    uint8_t c5[5] = {};
+    int32_t d = 0;
+    if (!img.read(at, c5, sizeof(c5)) || (c5[0] != 0xE8 && c5[0] != 0xE9)) return 0;
+    std::memcpy(&d, c5 + 1, 4);
+    return at + 5 + static_cast<uint32_t>(d);
+  };
+  // SaveDataManager.getSaveFileDetailList [66178] (exe+0x17D7190): a user other than <LastDetailUserIndex>
+  // (+0x48) has the native refresh called - `mov rcx,[rip+service]; mov edx,eax; call` - and that refresh
+  // (exe+0x2AEB340) skips a table it thinks fresh by its counter at +0x74: `cmp esi,[rbx+0x74] ...
+  // mov [rbx+0x74],esi`. What the mod writes (the counter and the last user to -1) has the game re-read it.
+  const uint8_t last_user[] = {0x3B, 0x82, 0x98, 0x00, 0x00, 0x00};  // cmp eax,[rdx+0x98]: <LastDetailUserIndex>
+  const uint8_t service[] = {0x48, 0x8B, 0x0D};                       // mov rcx,[rip+service]
+  check(img.read(0x17D71CE, b, sizeof(last_user)) && std::memcmp(b, last_user, sizeof(last_user)) == 0 &&
+            img.read(0x17D71D6, b, 3) && std::memcmp(b, service, 3) == 0 && img.read(0x17D71DD, b, 2) &&
+            b[0] == 0x8B && b[1] == 0xD0 && rel32(0x17D71DF) == 0x2AEB340,
+        "getSaveFileDetailList (exe+0x17D7190): another user than <LastDetailUserIndex> has the native refresh "
+        "(exe+0x2AEB340) called with the save service");
+  const uint8_t fresh_cmp[] = {0x3B, 0x73, 0x74}, fresh_set[] = {0x89, 0x73, 0x74};
+  check(img.read(0x2AEB392, b, 3) && std::memcmp(b, fresh_cmp, 3) == 0 && img.read(0x2AEB3BE, b + 8, 3) &&
+            std::memcmp(b + 8, fresh_set, 3) == 0,
+        "the native refresh (exe+0x2AEB340): its \"fresh\" counter at +0x74, compared and stored");
+  // The typewriter's save screen, as in build 24468913.
+  const uint8_t mode[] = {0x44, 0x8B, 0x87, 0x90, 0x00, 0x00, 0x00};  // mov r8d,[rdi+0x90]: SaveModeValue (+0x40)
+  check(img.read(0xBD7FAF, b, sizeof(mode)) && std::memcmp(b, mode, sizeof(mode)) == 0 && rel32(0xBD7FBB) == 0x17D7190,
+        "SaveLoadBaseBehavior.reloadSaveDetail [202419] (exe+0xBD7F70): both screens' list is "
+        "SaveDataManager.getSaveFileDetailList(SaveModeValue)");
+  const uint8_t index_min[] = {0xC7, 0x82, 0xC0, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00};  // SaveDataIndexMin (+0x70) = 1
+  check(img.read(0x5CBAF0, b, sizeof(index_min)) && std::memcmp(b, index_min, sizeof(index_min)) == 0 &&
+            rel32(0x5CBAFA) == 0xBD2F90,
+        "SaveBehavior.doAwake [202432] (exe+0x5CBAF0): SaveDataIndexMin = 1, then the base's doAwake - its rows start "
+        "at slot 1");
+  check(img.read(0x5CE050, b, 0x26) && rel32(0x5CE05C) == 0x17D76B0 && b[0x24] == 0xFF && b[0x25] == 0xC8,
+        "SaveBehavior.getSaveListCount [202442] (exe+0x5CE050): SaveDataManager.getSaveListCount less one (dec eax) - "
+        "no auto-save row");
+  const uint8_t save_wait[] = {0x83, 0xB8, 0xA0, 0x00, 0x00, 0x00, 0x02};  // cmp [manager+0xA0],2: saveLoadStep (+0x50)
+  const uint8_t save_request[] = {0x80, 0x78, 0x78, 0x00};                // cmp byte [manager+0x78],0: SaveRequest (+0x28)
+  const uint8_t is_saved[] = {0xC6, 0x82, 0xE1, 0x00, 0x00, 0x00, 0x01};   // mov byte [screen+0xE1],1: IsSaved (+0x91)
+  uint8_t req[sizeof(save_request)] = {};
+  check(img.read(0xBD3EC1, b, sizeof(save_wait)) && std::memcmp(b, save_wait, sizeof(save_wait)) == 0 &&
+            img.read(0xBD3ECE, req, sizeof(req)) && std::memcmp(req, save_request, sizeof(req)) == 0 &&
+            img.read(0xBD4457, b, sizeof(is_saved)) && std::memcmp(b, is_saved, sizeof(is_saved)) == 0,
+        "SaveLoadBaseBehavior.update [202413] (exe+0xBD3E00): IsSaved set while the manager is at SAVE_WAIT or has "
+        "a SaveRequest");
+  std::printf("%s (%d failure%s)\n", g_fail ? "FAILED" : "all passed", g_fail, g_fail == 1 ? "" : "s");
+  return g_fail ? 1 : 0;
+}
 
 }  // namespace
 
@@ -167,6 +274,19 @@ int main(int argc, char** argv) {
     check(rules::getter_constant(invalid, sizeof(invalid), &c) && c == INT32_MIN, "mov eax,0x80000000; ret: INT32_MIN");
     check(!rules::getter_constant(slot, sizeof(slot), &c), "a load is not a constant");
     check(rules::chars_offset(chars, sizeof(chars)) == 0x14, "String.get_Chars: characters at +0x14");
+    // The dx11_non-rt build's text getter (build 11047294's SaveFileDetail.get_Title, exe+0x139F280 - the
+    // very code RE2CabbyCodes' dx11_non-rt build has): the engine's own UTF-16 string at +0x18, copied to
+    // rsp+0x20 and made a managed one.
+    const uint8_t native[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x48, 0x8B, 0xF9,
+                              0x48, 0x83, 0xC2, 0x18, 0x48, 0x8D, 0x4C, 0x24, 0x20, 0xE8, 0x95, 0x14, 0xCC,
+                              0xFE, 0x83, 0x7C, 0x24, 0x3C, 0x0C, 0x4C, 0x8D, 0x44, 0x24, 0x20, 0x8B, 0x54,
+                              0x24, 0x38, 0x48, 0x8B, 0xCF, 0x4C, 0x0F, 0x43, 0x44, 0x24, 0x20};
+    rules::NativeText t;
+    check(rules::native_text_getter(native, sizeof(native), &t) && t.offset == 0x18 && t.length == 0x18 &&
+              t.capacity == 0x1C && t.inline_below == 12,
+          "the dx11_non-rt build's get_Title: a native UTF-16 string at +0x18 (length +0x18, capacity +0x1C, inline below 12)");
+    check(rules::getter_offset(native, sizeof(native), true) == -1, "... which is no plain getter");
+    check(!rules::native_text_getter(title, sizeof(title), &t), "the current build's plain getter is no native one");
   }
 
   if (argc > 1) {
@@ -175,6 +295,9 @@ int main(int argc, char** argv) {
       std::printf("cannot read %s\n", argv[1]);
       return 2;
     }
+    const uint32_t tdb = img.tdb_version();
+    std::printf("%s: TDB v%u (%s)\n", argv[1], tdb, tdb == 67 ? "the dx11_non-rt build 11047294" : "build 24468913");
+    if (tdb == 67) return non_rt(img);
     // Build 24468913's method RVAs (tools/tdb_dump.py --link).
     struct Getter {
       const char* name;

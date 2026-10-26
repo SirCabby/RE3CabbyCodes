@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Read RE Engine's type database straight out of re3.exe on disk - TDB v70 (RE3's
-current Steam build, 24468913, and RE2's, 11636119) or TDB v66 (RE2's dx11_non-rt
-beta, 11055033: kept from RE2CabbyCodes, to compare the two games' code).
+current Steam build, 24468913, and RE2's, 11636119), TDB v67 (RE3's dx11_non-rt beta,
+11047294) or TDB v66 (RE2's dx11_non-rt beta, 11055033: kept from RE2CabbyCodes, to
+compare the two games' code).
 
     python3 tools/tdb_dump.py --exe "$GAME_DIR/re3.exe" --dump tdb.txt       # every type, one block each
     python3 tools/tdb_dump.py --exe "$GAME_DIR/re3.exe" --type offline.gamemastering.InventoryManager
@@ -15,7 +16,8 @@ header's array pointers are offsets from the header itself (the VM turns them in
 pointers when it starts, and sets `initialized`). Layout per REFramework's tdb70/tdb69
 structs (shared/sdk/RETypeDB.hpp, RETypeDefinition.hpp), confirmed here by every
 array ending exactly where the next begins; TDB v66 per its tdb66 structs, except that
-the init data is the array at 0x88 (counted at 0x28) - see TDB66. Method function
+the init data is the array at 0x88 (counted at 0x28) - see TDB66; TDB v67 per its tdb67
+structs and RE3's 0x80 typedef - see TDB67. Method function
 pointers are absolute VAs in the file (relocated at load); they are printed as RVAs.
 Pure stdlib.
 """
@@ -108,10 +110,10 @@ class TDB:
         pos = pe.m.find(b"TDB\0", ro, ro + rs)
         while pos != -1:
             ver = struct.unpack_from("<I", pe.m, pos + 4)[0]
-            if (pos - ro) % 8 == 0 and ver in (66, 70):
-                return TDB66(pe, pos) if ver == 66 else TDB(pe, TDB.find(pe, 70))
+            if (pos - ro) % 8 == 0 and ver in (66, 67, 70):
+                return {66: TDB66, 67: TDB67}[ver](pe, pos) if ver != 70 else TDB(pe, TDB.find(pe, 70))
             pos = pe.m.find(b"TDB\0", pos + 1, ro + rs)
-        raise SystemExit("no TDB v70 or v66 in .data")
+        raise SystemExit("no TDB v70, v67 or v66 in .data")
 
     def type_sizes(self, i):
         ti = self.typeimpl(self.typedef(i)["impl"])
@@ -495,6 +497,79 @@ class TDB66(TDB):
         if off < 0:
             return ("str", self.string(-off))
         return ("bytes", self.byte_at(off))
+
+
+class TDB67(TDB66):
+    """TDB v67 - RE3's dx11_non-rt build (11047294), REFramework's tdb67 structs and its
+    RETypeDefVersion67_RE3 typedef.
+
+    TDB 66's header and its kind of records - no impl records, names and counts on the
+    records themselves - with 17-bit type indices and wider records: typedefs 0x80
+    (index:17 ?:13 parent:17 declaring:17 in the first qword; name +0x18, namespace
+    +0x1C, object type u8 +0x26, field size +0x2C; the members as plain u32s - first
+    method +0x38, methods +0x3C, first field +0x40, fields +0x44 -, properties
+    {num:12 first:19} +0x48, generics +0x58; the REObjectInfo of its instances +0x78 at
+    run time), fields 0x18 (declaring:17 type:17; name +8, flags +0xC, init index +0xE,
+    offset +0x10), methods 0x20 (declaring:17 invoke:16 params:6 ?:8 return:17; vtable
+    index +0xA, name +0xC, flags +0x10, impl flags +0x12, parameters +0x14 - a byte-pool
+    list of 8-byte {type:17 flags:16 name:31} - and the code +0x18), generic arguments
+    {definition:17 num:14; u32 types[]}. The array sizes say so: 81 386 x 0x80, 554 206 x
+    0x20 and 122 170 x 0x18 fill the types', methods' and fields' arrays exactly, and the
+    init data (0x28's count x 4, 16-byte aligned) the array at 0x88, as in TDB 66.
+    """
+
+    def typedef(self, i):
+        o = self.off + self.p_types + i * 0x80
+        a = struct.unpack_from("<Q", self.pe.m, o)[0]
+        fqn, crc = struct.unpack_from("<II", self.pe.m, o + 8)
+        name, ns, flags = struct.unpack_from("<III", self.pe.m, o + 0x18)
+        system, obj_type = self.pe.m[o + 0x24], self.pe.m[o + 0x26]
+        ctor, field_size, size = struct.unpack_from("<III", self.pe.m, o + 0x28)
+        mm, nm, mf, nf, mp = struct.unpack_from("<IIIII", self.pe.m, o + 0x38)
+        gen, vt = struct.unpack_from("<iI", self.pe.m, o + 0x58)
+        return dict(index=a & 0x1FFFF, parent=(a >> 30) & 0x1FFFF, declaring=(a >> 47) & 0x1FFFF, obj_type=obj_type,
+                    system=system, flags=flags, size=size, fqn=fqn, crc=crc, ctor=ctor, vt=vt, name=name, ns=ns,
+                    field_size=field_size, num_methods=nm, member_method=mm, num_fields=nf, member_field=mf,
+                    num_prop=mp & 0xFFF, member_prop=(mp >> 12) & 0x7FFFF, generics=gen, impl=None)
+
+    def generic_args(self, i):
+        t = self.typedef(i)
+        if t["generics"] <= 0 or t["generics"] >= self.n_bytes:
+            return []
+        w = struct.unpack_from("<I", self.pe.m, self.byte_at(t["generics"]))[0]
+        definition, num = w & 0x1FFFF, (w >> 17) & 0x3FFF
+        if definition == i or num == 0 or num > 16:
+            return []
+        return list(struct.unpack_from("<%dI" % num, self.pe.m, self.byte_at(t["generics"]) + 4))
+
+    def fields_of(self, i):
+        t = self.typedef(i)
+        out = []
+        for k in range(t["num_fields"]):
+            idx = t["member_field"] + k
+            o = self.off + self.p_fields + idx * 0x18
+            a, name, flags, init, offset = struct.unpack_from("<QIHHI", self.pe.m, o)
+            out.append(dict(index=idx, name=self.string(name), type=(a >> 17) & 0x1FFFF, offset=offset, flags=flags,
+                            init=init))
+        return out
+
+    def methods_of(self, i):
+        t = self.typedef(i)
+        out = []
+        for k in range(t["num_methods"]):
+            idx = t["member_method"] + k
+            o = self.off + self.p_methods + idx * 0x20
+            a, _pad, vt, name, flags, iflags, params, fn = struct.unpack_from("<QHhIHHIQ", self.pe.m, o)
+            num = (a >> 33) & 0x3F
+            ps = []
+            for p in range(num):
+                if params + 8 * (p + 1) > self.n_bytes:
+                    break
+                w = struct.unpack_from("<Q", self.pe.m, self.byte_at(params) + 8 * p)[0]
+                ps.append((w & 0x1FFFF, self.string((w >> 33) & 0x7FFFFFFF)))
+            out.append(dict(index=idx, name=self.string(name), fn=fn, flags=flags, vt_index=vt,
+                            ret=(a >> 47) & 0x1FFFF, params=ps))
+        return out
 
 
 def main():

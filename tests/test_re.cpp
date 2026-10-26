@@ -9,7 +9,9 @@
 // and then asks re:: for what the game layer asks for - class names, field
 // offsets up the class chain, enum literals, generic instance names, methods by
 // parameter types and their vtable slots - checking each answer against what
-// tools/tdb_dump.py reads out of the same file (build 24468913's values).
+// tools/tdb_dump.py reads out of the same file (build 24468913's values; the
+// dx11_non-rt build 11047294 numbers its types and methods its own way, and lays
+// out a few fields its own way).
 #include <windows.h>
 
 #include <cstdio>
@@ -22,6 +24,14 @@
 namespace {
 
 int g_fail = 0;
+bool g_rt = true;  // TDB 70 (build 24468913); false: TDB 67 (the dx11_non-rt build 11047294)
+
+// A type or method index the RT build's file has (tools/tdb_dump.py prints it):
+// exactly that there; in the dx11_non-rt build, which numbers everything its own
+// way, only that it is found.
+bool index_is(uint32_t got, uint32_t rt) { return g_rt ? got == rt : got != 0; }
+// A vtable slot, likewise: the dx11_non-rt build's classes have their own.
+bool slot_is(int got, int rt) { return g_rt ? got == rt : got >= 0; }
 
 void check(bool ok, const char* what) {
   std::printf("%s  %s\n", ok ? "ok  " : "FAIL", what);
@@ -51,7 +61,7 @@ int main(int argc, char** argv) {
     std::printf("cannot open %s\n", argv[1]);
     return 2;
   }
-  // Find the header in .data the way the mod does: magic, version 70.
+  // Find the header in .data the way the mod does: magic, version 70 or 67.
   IMAGE_DOS_HEADER dos;
   std::fread(&dos, sizeof(dos), 1, f);
   IMAGE_NT_HEADERS64 nt;
@@ -75,16 +85,18 @@ int main(int argc, char** argv) {
   for (; at + 8 < sec.size(); at += 8) {
     if (std::memcmp(&sec[at], "TDB\0", 4)) continue;
     version = *reinterpret_cast<uint32_t*>(&sec[at + 4]);
-    if (version == 70) break;
+    if (version == 70 || version == 67) break;
   }
-  check(at + 8 < sec.size(), "a TDB v70 header found in .data");
+  check(at + 8 < sec.size(), "a TDB v70 or v67 header found in .data");
   if (at + 8 >= sec.size()) return 1;
+  g_rt = version == 70;
+  std::printf("TDB v%u: %s\n", version, g_rt ? "build 24468913 (ray tracing)" : "the dx11_non-rt build 11047294");
   // Copy from the header to the end of the section and rebase the array offsets
-  // into pointers, as the VM does: 18 from 0x58.
+  // into pointers, as the VM does: 18 from 0x58 (TDB 70), 13 from 0x48 (TDB 67).
   const size_t len = sec.size() - at;
   auto* tdb = static_cast<uint8_t*>(VirtualAlloc(nullptr, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
   std::memcpy(tdb, &sec[at], len);
-  const int first_array = 0x58, arrays = 18;
+  const int first_array = g_rt ? 0x58 : 0x48, arrays = g_rt ? 18 : 13;
   for (int i = 0; i < arrays; ++i) {
     auto* p = reinterpret_cast<uint64_t*>(tdb + first_array + 8 * i);
     if (*p) *p += reinterpret_cast<uint64_t>(tdb);
@@ -94,10 +106,10 @@ int main(int argc, char** argv) {
   std::printf("status: %s, %u types\n", re3cc::re::status(), re3cc::re::num_types());
 
   using namespace re3cc;
-  check(re::find_type("via.GameObject") == 68607, "via.GameObject is type 68607");
-  check(re::find_type("offline.gamemastering.InventoryManager") == 28928, "InventoryManager is type 28928");
-  check(re::find_type("offline.gamemastering.InventoryManager.PrimitiveItem") == 73620, "nested PrimitiveItem is type 73620");
-  check(re::find_type("System.Collections.Generic.List`1<offline.inventory.Slot>") == 69109, "List<Slot> by name");
+  check(index_is(re::find_type("via.GameObject"), 68607), "via.GameObject is type 68607");
+  check(index_is(re::find_type("offline.gamemastering.InventoryManager"), 28928), "InventoryManager is type 28928");
+  check(index_is(re::find_type("offline.gamemastering.InventoryManager.PrimitiveItem"), 73620), "nested PrimitiveItem is type 73620");
+  check(index_is(re::find_type("System.Collections.Generic.List`1<offline.inventory.Slot>"), 69109), "List<Slot> by name");
   check(re::full_name(re::parent(re::find_type("offline.gamemastering.InventoryManager"))) ==
             "offline.RopewaySingletonBehaviorRoot`1<offline.gamemastering.InventoryManager>",
         "InventoryManager's parent is its singleton root (RE2's RopewaySingletonBehaviorRoot, kept)");
@@ -138,8 +150,11 @@ int main(int argc, char** argv) {
   check_field("offline.GameClock.GameSaveData", "_PauseSpendingTime", 0x20);
   check_field("offline.gamemastering.RecordManager", "<CurrentSaveCount>k__BackingField", 0x8);
   check_field("offline.gamemastering.RecordManager", "<CurrentClearTime>k__BackingField", 0x0);
-  check_field("offline.gamemastering.MainFlowManager", "_CurrentMainState", 0x90);
-  check_field("offline.gamemastering.MainFlowManager", "gameHeaderSaveData", 0x150);
+  // The main state: a field of its own in the current build, the auto-property's
+  // backing field in the dx11_non-rt build (both what MainStateValue reads).
+  if (g_rt) check_field("offline.gamemastering.MainFlowManager", "_CurrentMainState", 0x90);
+  else check_field("offline.gamemastering.MainFlowManager", "<MainStateValue>k__BackingField", 0x88);
+  check_field("offline.gamemastering.MainFlowManager", "gameHeaderSaveData", g_rt ? 0x150 : 0x148);
   check_field("offline.gamemastering.MainFlowManager.GameHeaderSaveData", "SaveTimes", 0x14);
   check_field("offline.gamemastering.ItemLockerManager", "gameSaveData", 0x18);
   check_field("offline.gamemastering.ItemLockerManager.GameSaveData", "SaveData", 0x8);
@@ -170,27 +185,27 @@ int main(int argc, char** argv) {
   check(re::enum_value(wp, "WP0000", -1) == 1 && re::enum_value(wp, "WP4600", -1) == 49, "WeaponType.WP0000 = 1, WP4600 (the infinite rocket launcher) = 49");
 
   // The overloads call.cpp calls, by parameter types (indices as tools/tdb_dump.py prints them).
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "setStock", {"System.Int32", "offline.gamemastering.InventoryManager.StockItem"}) == 116981, "InventoryManager.setStock(Int32, StockItem) is method 116981");
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "removeStock", {"System.Int32"}) == 116986, "InventoryManager.removeStock(Int32) is method 116986");
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "putShortcutWeapon", {"System.Int32"}) == 117053, "InventoryManager.putShortcutWeapon(Int32) is method 117053");
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "updateInventoryFlags", {}) == 117019, "InventoryManager.updateInventoryFlags() is method 117019");
-  check(re::find_method(re::find_type("offline.survivor.Inventory"), "unequipSlot", {"System.Int32"}) == 115874, "Inventory.unequipSlot(Int32) is method 115874");
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager.ItemData"), "setData", {"offline.gamemastering.InventoryManager.ItemData"}) == 31075, "ItemData.setData(ItemData) is method 31075, not its other overloads");
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager.ItemData"), "setBlank", {}) == 31071, "ItemData.setBlank() is method 31071");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "setStock", {"System.Int32", "offline.gamemastering.InventoryManager.StockItem"}), 116981), "InventoryManager.setStock(Int32, StockItem) is method 116981");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "removeStock", {"System.Int32"}), 116986), "InventoryManager.removeStock(Int32) is method 116986");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "putShortcutWeapon", {"System.Int32"}), 117053), "InventoryManager.putShortcutWeapon(Int32) is method 117053");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "updateInventoryFlags", {}), 117019), "InventoryManager.updateInventoryFlags() is method 117019");
+  check(index_is(re::find_method(re::find_type("offline.survivor.Inventory"), "unequipSlot", {"System.Int32"}), 115874), "Inventory.unequipSlot(Int32) is method 115874");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager.ItemData"), "setData", {"offline.gamemastering.InventoryManager.ItemData"}), 31075), "ItemData.setData(ItemData) is method 31075, not its other overloads");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager.ItemData"), "setBlank", {}), 31071), "ItemData.setBlank() is method 31071");
   check(re::find_method(re::find_type("offline.gamemastering.InventoryManager.ItemData"), "setData", {"System.Int32"}) == 0, "no ItemData.setData(Int32)");
   check(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "setStock", {"System.Int32", "offline.gamemastering.InventoryManager.StockItem"}, true) == 0, "setStock is not static");
-  check(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "isFatWeapon", {"offline.EquipmentDefine.WeaponType", "offline.EquipmentDefine.WeaponParts"}, true) == 117086, "InventoryManager.isFatWeapon(WeaponType, WeaponParts) is static method 117086");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.InventoryManager"), "isFatWeapon", {"offline.EquipmentDefine.WeaponType", "offline.EquipmentDefine.WeaponParts"}, true), 117086), "InventoryManager.isFatWeapon(WeaponType, WeaponParts) is static method 117086");
   check(re::enum_value(re::find_type("offline.EquipmentDefine.WeaponParts"), "A", -1) == 1, "WeaponParts.A = 1");
-  check(re::find_method(re::find_type("offline.survivor.Inventory"), "isRightEdgeSlot", {"System.Int32"}) == 115929, "Inventory.isRightEdgeSlot(Int32) is method 115929");
+  check(index_is(re::find_method(re::find_type("offline.survivor.Inventory"), "isRightEdgeSlot", {"System.Int32"}), 115929), "Inventory.isRightEdgeSlot(Int32) is method 115929");
 
   // The ammo a weapon takes (game.cpp, the inventory editor's weapons): the kind
   // fields beside the number in WeaponBulletUserData's entries, and
   // EquipmentDefine.getItemID, which is static - find_method matches static-ness,
   // so a lookup that does not say so finds nothing (RE2CabbyCodes' weapons were
   // made unreloadable by that once: BulletId 0).
-  check(re::find_method(re::find_type("offline.EquipmentDefine"), "getItemID", {"offline.EquipmentDefine.Bullet"}, true) == 117135, "EquipmentDefine.getItemID(Bullet) is static method 117135");
+  check(index_is(re::find_method(re::find_type("offline.EquipmentDefine"), "getItemID", {"offline.EquipmentDefine.Bullet"}, true), 117135), "EquipmentDefine.getItemID(Bullet) is static method 117135");
   check(re::find_method(re::find_type("offline.EquipmentDefine"), "getItemID", {"offline.EquipmentDefine.Bullet"}) == 0, "getItemID is not found as an instance method - the lookup must say static");
-  check(re::find_method(re::find_type("offline.EquipmentDefine"), "getBulletType", {"offline.gamemastering.Item.ID"}, true) == 117134, "EquipmentDefine.getBulletType(Item.ID) is static method 117134 (its inverse)");
+  check(index_is(re::find_method(re::find_type("offline.EquipmentDefine"), "getBulletType", {"offline.gamemastering.Item.ID"}, true), 117134), "EquipmentDefine.getBulletType(Item.ID) is static method 117134 (its inverse)");
   check_field("offline.EquipmentManager", "_Instance", 0x0, true);
   check_field("offline.EquipmentManager", "_WeaponBulletUserdata", 0x28);
   check_field("offline.WeaponBulletUserData", "_LoadingPartsCombos", 0x0);
@@ -226,7 +241,7 @@ int main(int argc, char** argv) {
   check(re::is_value_type(re::find_type("System.Collections.Generic.Dictionary`2.Entry<offline.gamemastering.Item.ID,offline.gamemastering.item.ItemElement>")) && re::value_size(re::find_type("System.Collections.Generic.Dictionary`2.Entry<offline.gamemastering.Item.ID,offline.gamemastering.item.ItemElement>")) == 0x18,
         "the dictionary's Entry is a 0x18-byte value type");
   check(re::enum_value(re::find_type("offline.gamemastering.item.Disposable"), "MultipleUse", -1) == 2, "item.Disposable.MultipleUse = 2");
-  check(re::find_method(re::find_type("offline.gamemastering.ItemManager"), "getItemMultipleUseMax", {"offline.gamemastering.Item.ID"}) == 402423, "ItemManager.getItemMultipleUseMax(Item.ID) is instance method 402423");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.ItemManager"), "getItemMultipleUseMax", {"offline.gamemastering.Item.ID"}), 402423), "ItemManager.getItemMultipleUseMax(Item.ID) is instance method 402423");
 
   // The difficulty switch (game.cpp, call.cpp): RE3's five difficulties, the
   // header's, the game over screen's continue-on-Assisted hold, the manager whose
@@ -237,7 +252,7 @@ int main(int argc, char** argv) {
   check_field("offline.gamemastering.MainFlowManager.GameHeaderSaveData", "CurrentDifficulty", 0x10);
   check_field("offline.gamemastering.MainFlowManager", "<ForceEasyContinue>k__BackingField", 0x74);
   check_field("offline.gamemastering.GlobalUserDataManager", "_Instance", 0x0, true);
-  check(re::find_method(re::find_type("offline.gamemastering.MainFlowManager"), "setDifficulty", {"offline.gamemastering.MainFlowManager.Difficulty"}) == 65137, "MainFlowManager.setDifficulty(Difficulty) is instance method 65137");
+  check(index_is(re::find_method(re::find_type("offline.gamemastering.MainFlowManager"), "setDifficulty", {"offline.gamemastering.MainFlowManager.Difficulty"}), 65137), "MainFlowManager.setDifficulty(Difficulty) is instance method 65137");
   check(re::find_method(re::find_type("offline.gamemastering.MainFlowManager"), "setDifficulty", {"offline.gamemastering.MainFlowManager.Difficulty"}, true) == 0, "setDifficulty is not static");
 
   // The records' counters (game.cpp, events.cpp): what the results screen checks
@@ -246,7 +261,7 @@ int main(int argc, char** argv) {
   check_field("offline.gamemastering.RecordManager", "gameSaveData", 0x40);
   check_field("offline.gamemastering.RecordManager.GameSaveData", "OpenItemBox", 0x8);
   check_field("offline.gamemastering.RecordManager.GameSaveData", "UseHealItem", 0xC);
-  check_field("offline.gamemastering.RecordManager", "RecordDataList", 0xC8);
+  check_field("offline.gamemastering.RecordManager", "RecordDataList", g_rt ? 0xC8 : 0xC0);
   check_field("offline.gamemastering.RecordManager.RecordNode", "ProgressType", 0x30);
   check_field("offline.gamemastering.RecordManager.RecordNode", "ClearCount", 0x34);
   check_field("offline.gamemastering.RecordManager.RecordNode", "ShopPoint", 0x3C);
@@ -254,39 +269,39 @@ int main(int argc, char** argv) {
         "RecordManager.ProgressType ITEMBOX = 4, CURE = 5");
   {
     const uint32_t m = re::find_method(re::find_type("offline.fsmv2.SwitchItemToInventory"), "update", {"via.behaviortree.ActionArg"});
-    check(m == 406613 && re::method_vt_index(m) == 9, "SwitchItemToInventory.update(ActionArg) is method 406613, virtual[9]");
+    check(index_is(m, 406613) && slot_is(re::method_vt_index(m), 9), "SwitchItemToInventory.update(ActionArg) is method 406613, virtual[9]");
   }
   {
     const uint32_t m = re::find_method(re::find_type("offline.escape.gimmick.action.EsGimmickItemLocker"), "updateGimmick", {});
-    check(m == 423233 && re::method_vt_index(m) == 57, "EsGimmickItemLocker.updateGimmick() is method 423233, virtual[57]");
+    check(index_is(m, 423233) && slot_is(re::method_vt_index(m), 57), "EsGimmickItemLocker.updateGimmick() is method 423233, virtual[57]");
   }
   {
     const uint32_t m = re::find_method(re::find_type("offline.gui.EsInventorySlotBehavior"), "update", {});
-    check(m == 156929 && re::method_vt_index(m) == 15, "EsInventorySlotBehavior.update() is method 156929, virtual[15]");
+    check(index_is(m, 156929) && slot_is(re::method_vt_index(m), 15), "EsInventorySlotBehavior.update() is method 156929, virtual[15]");
   }
   {
     const uint32_t m = re::find_method(re::find_type("offline.survivor.player.EsPlayerActionOrderer"), "doSurvivorActionOrdererUpdate", {});
-    check(m == 120909 && re::method_vt_index(m) == 29, "EsPlayerActionOrderer.doSurvivorActionOrdererUpdate() is method 120909, virtual[29]");
+    check(index_is(m, 120909) && slot_is(re::method_vt_index(m), 29), "EsPlayerActionOrderer.doSurvivorActionOrdererUpdate() is method 120909, virtual[29]");
   }
 
   // The cheats' own events (events.cpp): the hit handlers the game makes delegates
   // of (hooked in their database entries), the shot and the save's two captures
   // (virtual: hooked in their classes' vtables), and the hit's DamageInfo.
-  check(re::find_method(re::find_type("offline.EnemyController"), "HitController_OnHitDamage", {"offline.Collision.HitController.DamageInfo"}) == 107906, "EnemyController.HitController_OnHitDamage(DamageInfo) is method 107906");
-  check(re::find_method(re::find_type("offline.EnemyReactionController"), "onHitDamage", {"offline.Collision.HitController.DamageInfo"}) == 98989, "EnemyReactionController.onHitDamage(DamageInfo) is method 98989");
-  check(re::find_method(re::find_type("offline.survivor.SurvivorCondition"), "checkHitDamage", {"offline.Collision.HitController.DamageInfo"}) == 126056, "SurvivorCondition.checkHitDamage(DamageInfo) is method 126056");
-  check(re::find_method(re::find_type("offline.survivor.player.PlayerCondition"), "onHitDamage", {"offline.Collision.HitController.DamageInfo"}) == 56937, "PlayerCondition.onHitDamage(DamageInfo) is method 56937");
+  check(index_is(re::find_method(re::find_type("offline.EnemyController"), "HitController_OnHitDamage", {"offline.Collision.HitController.DamageInfo"}), 107906), "EnemyController.HitController_OnHitDamage(DamageInfo) is method 107906");
+  check(index_is(re::find_method(re::find_type("offline.EnemyReactionController"), "onHitDamage", {"offline.Collision.HitController.DamageInfo"}), 98989), "EnemyReactionController.onHitDamage(DamageInfo) is method 98989");
+  check(index_is(re::find_method(re::find_type("offline.survivor.SurvivorCondition"), "checkHitDamage", {"offline.Collision.HitController.DamageInfo"}), 126056), "SurvivorCondition.checkHitDamage(DamageInfo) is method 126056");
+  check(index_is(re::find_method(re::find_type("offline.survivor.player.PlayerCondition"), "onHitDamage", {"offline.Collision.HitController.DamageInfo"}), 56937), "PlayerCondition.onHitDamage(DamageInfo) is method 56937");
   {
     const uint32_t m = re::find_method(re::find_type("offline.survivor.Equipment"), "executeFire", {"offline.EquipmentDefine.WeaponType", "System.Int32"});
-    check(m == 118840 && re::method_vt_index(m) == 33, "Equipment.executeFire(WeaponType, Int32) is method 118840, virtual[33]");
+    check(index_is(m, 118840) && slot_is(re::method_vt_index(m), 33), "Equipment.executeFire(WeaponType, Int32) is method 118840, virtual[33]");
   }
   {
     const uint32_t m = re::find_method(re::find_type("offline.gamemastering.MainFlowManager"), "saveGameSaveData", {});
-    check(m == 65183 && re::method_vt_index(m) == 25, "MainFlowManager.saveGameSaveData() is method 65183, virtual[25]");
+    check(index_is(m, 65183) && slot_is(re::method_vt_index(m), 25), "MainFlowManager.saveGameSaveData() is method 65183, virtual[25]");
   }
   {
     const uint32_t m = re::find_method(re::find_type("offline.GameClock"), "saveGameSaveData", {});
-    check(m == 376449 && re::method_vt_index(m) == 32, "GameClock.saveGameSaveData() is method 376449, virtual[32]");
+    check(index_is(m, 376449) && slot_is(re::method_vt_index(m), 32), "GameClock.saveGameSaveData() is method 376449, virtual[32]");
   }
   check_field("offline.Collision.HitController.DamageInfo", "<Damage>k__BackingField", 0x7C);
   check_field("offline.Collision.HitController.DamageInfo", "<IsKill>k__BackingField", 0xD1);
@@ -302,7 +317,7 @@ int main(int argc, char** argv) {
   {
     const uint32_t m = re::find_method(re::find_type("offline.escape.enemy.em9300.EsEm9300Think"), "onHitDamageKnob",
                                        {"offline.Collision.HitController.DamageInfo"});
-    check(m == 202525 && re::method_vt_index(m) < 0, "EsEm9300Think.onHitDamageKnob(DamageInfo) is method 202525, not virtual");
+    check(index_is(m, 202525) && re::method_vt_index(m) < 0, "EsEm9300Think.onHitDamageKnob(DamageInfo) is method 202525, not virtual");
   }
   check_field("offline.escape.enemy.em9300.EsEm9300Think", "KnobList", 0x2B0);
   check_field("offline.escape.enemy.em9300.EsEm9300Knob", "<HitController>k__BackingField", 0x50);
@@ -321,20 +336,20 @@ int main(int argc, char** argv) {
     const char* const arg = "via.behaviortree.ConditionArg";
     const uint32_t parasite = re::find_method(
         re::find_type("offline.survivor.fsmv2.condition.SurvivorCheckCheckParasiteDeadCondition"), "doEvaluate", {arg});
-    check(parasite == 414292 && re::method_vt_index(parasite) == 7,
+    check(index_is(parasite, 414292) && slot_is(re::method_vt_index(parasite), 7),
           "SurvivorCheckCheckParasiteDeadCondition.doEvaluate(ConditionArg) is method 414292, virtual[7]");
     const uint32_t zombie = re::find_method(
         re::find_type("offline.enemy.em0000.fsmv2.condition.Em0000MFsmCondition_ReservedKillTarget"), "doEvaluate", {arg});
-    check(zombie == 419080 && re::method_vt_index(zombie) == 7,
+    check(index_is(zombie, 419080) && slot_is(re::method_vt_index(zombie), 7),
           "Em0000MFsmCondition_ReservedKillTarget.doEvaluate(ConditionArg) is method 419080, virtual[7]");
     const uint32_t licker = re::find_method(
         re::find_type("offline.enemy.em3000.fsmv2.condition.Em3000FsmCondition_CheckPlayerKill"), "doEvaluate", {arg});
-    check(licker == 420902 && re::method_vt_index(licker) == 7,
+    check(index_is(licker, 420902) && slot_is(re::method_vt_index(licker), 7),
           "Em3000FsmCondition_CheckPlayerKill.doEvaluate(ConditionArg) is method 420902, virtual[7]");
     const uint32_t bite = re::find_method(
         re::find_type("offline.escape.enemy.common.fsmv2.action.EsEnemyMFsmAction_GrappleBranch"), "OnStart",
         {"via.behaviortree.ActionArg"});
-    check(bite == 427949 && re::method_vt_index(bite) == 14,
+    check(index_is(bite, 427949) && slot_is(re::method_vt_index(bite), 14),
           "EsEnemyMFsmAction_GrappleBranch.OnStart(ActionArg) is method 427949, virtual[14]");
   }
   check_field("offline.escape.enemy.common.fsmv2.action.EsEnemyMFsmAction_GrappleBranchBase",
@@ -353,8 +368,8 @@ int main(int argc, char** argv) {
   {
     check_field("offline.gamemastering.RecordManager", "_Instance", 0x0, true);
     check_field("offline.gamemastering.RecordManager", "systemSaveData", 0x38);
-    check_field("offline.gamemastering.RecordManager", "RecordIdList", 0xC0);
-    check_field("offline.gamemastering.RecordManager", "RewardDataList", 0xD0);
+    check_field("offline.gamemastering.RecordManager", "RecordIdList", g_rt ? 0xC0 : 0xB8);
+    check_field("offline.gamemastering.RecordManager", "RewardDataList", g_rt ? 0xD0 : 0xC8);
     check_field("offline.gamemastering.RecordManager", "<Naomi>k__BackingField", 0x31);
     check_field("offline.gamemastering.RecordManager", "TOTAL_SHOP_POINT", 0x10, true);
     check_field("offline.gamemastering.RecordManager.SystemSaveData", "RecordProgressNumber", 0x40);
@@ -375,10 +390,10 @@ int main(int argc, char** argv) {
     check_field("offline.GimmickDialLockManager", "_SystemSaveData", 0x0);
     check_field("offline.GimmickDialLockManager.SystemSaveData", "LockRecordList", 0x8);
     check(re::value_size(re::find_type("offline.GimmickDialLockManager.LockData")) == 1, "a lock's LockData is one byte (the bool records.cpp clears)");
-    check(re::find_method(re::find_type("offline.GimmickDialLockManager"), "SetUnlockRecord", {"offline.GimmickDialLockManager.RecordDialLock"}) == 220543, "GimmickDialLockManager.SetUnlockRecord(RecordDialLock) is method 220543");
-    check(re::find_method(re::find_type("offline.escape.gimmick.action.EsGimmickBobbingHead"), "Broken", {}) == 422669, "EsGimmickBobbingHead.Broken() is method 422669");
-    check(re::find_method(re::find_type("offline.gamemastering.RecordManager"), "clearRecord", {"offline.gamemastering.RecordManager.RecordId"}) == 88655, "RecordManager.clearRecord(RecordId) is method 88655");
-    check(re::find_method(re::find_type("offline.gamemastering.RecordManager"), "addRecordCount", {"offline.gamemastering.RecordManager.RecordId", "System.Int32"}) == 88656, "RecordManager.addRecordCount(RecordId, Int32) is method 88656");
+    check(index_is(re::find_method(re::find_type("offline.GimmickDialLockManager"), "SetUnlockRecord", {"offline.GimmickDialLockManager.RecordDialLock"}), 220543), "GimmickDialLockManager.SetUnlockRecord(RecordDialLock) is method 220543");
+    check(index_is(re::find_method(re::find_type("offline.escape.gimmick.action.EsGimmickBobbingHead"), "Broken", {}), 422669), "EsGimmickBobbingHead.Broken() is method 422669");
+    check(index_is(re::find_method(re::find_type("offline.gamemastering.RecordManager"), "clearRecord", {"offline.gamemastering.RecordManager.RecordId"}), 88655), "RecordManager.clearRecord(RecordId) is method 88655");
+    check(index_is(re::find_method(re::find_type("offline.gamemastering.RecordManager"), "addRecordCount", {"offline.gamemastering.RecordManager.RecordId", "System.Int32"}), 88656), "RecordManager.addRecordCount(RecordId, Int32) is method 88656");
     check_field("offline.gamemastering.SaveDataManager", "SaveRequest", 0x28);
     check_field("offline.gamemastering.SaveDataManager", "LoadRequest", 0x29);
     check_field("offline.gamemastering.SaveDataManager", "RemoveRequest", 0x2A);
@@ -386,9 +401,15 @@ int main(int argc, char** argv) {
     check_field("offline.gamemastering.SaveDataManager", "SlotId", 0x2C);
     check_field("offline.gamemastering.SaveDataManager", "<saveLoadStep>k__BackingField", 0x50);
     const uint32_t step = re::find_type("offline.gamemastering.SaveDataManager.SaveLoadStep");
-    check(re::enum_value(step, "INITIALIZE", -1) == 0 && re::enum_value(step, "REQUEST_WAIT", -1) == 1 &&
-              re::enum_value(step, "PS5_CROSSSAVE_DIALOG", -1) == 15,
-          "SaveLoadStep INITIALIZE 0, REQUEST_WAIT 1, PS5_CROSSSAVE_DIALOG 15 (get_IsBusy's idle steps)");
+    if (g_rt)
+      check(re::enum_value(step, "INITIALIZE", -1) == 0 && re::enum_value(step, "REQUEST_WAIT", -1) == 1 &&
+                re::enum_value(step, "PS5_CROSSSAVE_DIALOG", -1) == 15,
+            "SaveLoadStep INITIALIZE 0, REQUEST_WAIT 1, PS5_CROSSSAVE_DIALOG 15 (get_IsBusy's idle steps)");
+    else
+      check(re::enum_value(step, "INITIALIZE", -1) == 0 && re::enum_value(step, "REQUEST_WAIT", -1) == 1 &&
+                re::enum_value(step, "PS5_CROSSSAVE_DIALOG", -1) == -1 &&
+                re::enum_value(step, "ERROR_START_INDEX", -1) == 5,
+            "SaveLoadStep INITIALIZE 0, REQUEST_WAIT 1, no PS5 steps, errors from 5 (the dx11_non-rt build)");
     check(re::enum_value(re::find_type("offline.gamemastering.RecordManager.RecordId"), "MAX", -1) == 91, "RecordId.MAX = 91");
     const uint32_t reward = re::find_type("offline.gamemastering.RecordManager.RewardId");
     check(re::enum_value(reward, "MAX", -1) == 133 && re::enum_value(reward, "OPEN_MODE_00", -1) == 1 &&
@@ -399,12 +420,12 @@ int main(int argc, char** argv) {
           "DifficultyOpenState OpenSuperHard = 1, OpenUnlimited = 2");
     {
       const uint32_t m = re::find_method(re::find_type("offline.gui.RecordBehavior"), "update", {});
-      check(m == 214672 && re::method_vt_index(m) == 15, "RecordBehavior.update() is method 214672, virtual[15]");
+      check(index_is(m, 214672) && slot_is(re::method_vt_index(m), 15), "RecordBehavior.update() is method 214672, virtual[15]");
     }
     check_field("offline.gui.RecordBehavior", "EnableInput_", 0x24);
     check_field("offline.gamemastering.AchievementManager", "_Instance", 0x0, true);
     check_field("offline.gamemastering.AchievementManager", "AchievementService", 0x8);
-    check(re::find_method(re::find_type("offline.gamemastering.AchievementManager"), "unlockRecord", {"offline.gamemastering.RecordManager.RecordId", "System.Boolean"}) == 404069, "AchievementManager.unlockRecord(RecordId, Boolean) is instance method 404069");
+    check(index_is(re::find_method(re::find_type("offline.gamemastering.AchievementManager"), "unlockRecord", {"offline.gamemastering.RecordManager.RecordId", "System.Boolean"}), 404069), "AchievementManager.unlockRecord(RecordId, Boolean) is instance method 404069");
     check_field("offline.gamemastering.AchievementDefine", "Record2AchievementID", 0x0, true);
     check_field("System.Collections.Generic.Dictionary`2<offline.gamemastering.RecordManager.RecordId,offline.gamemastering.AchievementDefine.ID>", "_entries", 0x8);
     check_field("System.Collections.Generic.Dictionary`2.Entry<offline.gamemastering.RecordManager.RecordId,offline.gamemastering.AchievementDefine.ID>", "key", 0x8);
@@ -421,7 +442,7 @@ int main(int argc, char** argv) {
     check(load && base && re::parent(load) == base, "LoadBehavior's parent is SaveLoadBaseBehavior");
     {
       const uint32_t m = re::find_method(re::find_type("offline.gui.SaveLoadBaseBehavior"), "update", {});
-      check(m == 211327 && re::method_vt_index(m) == 15, "SaveLoadBaseBehavior.update() is method 211327, virtual[15]");
+      check(index_is(m, 211327) && slot_is(re::method_vt_index(m), 15), "SaveLoadBaseBehavior.update() is method 211327, virtual[15]");
     }
     check(re::find_method(load, "update", {}) == 0, "LoadBehavior has no update of its own (its vtable holds its base's)");
     check_field("offline.gui.SaveLoadBaseBehavior", "<SaveFileDetailList>k__BackingField", 0x20);
@@ -430,7 +451,7 @@ int main(int argc, char** argv) {
     check_field("offline.gui.SaveLoadBaseBehavior", "SaveModeValue", 0x40);
     check_field("offline.gui.SaveLoadBaseBehavior", "IsLoaded", 0x90);
     check_field("offline.gui.SaveLoadBaseBehavior", "IsSaved", 0x91);
-    check(re::find_method(re::find_type("offline.gui.SaveLoadBaseBehavior"), "set_SaveFileDetailList", {"System.Collections.Generic.List`1<via.storage.saveService.SaveFileDetail>"}) == 211309, "SaveLoadBaseBehavior.set_SaveFileDetailList(SaveFileDetail>) is method 211309");
+    check(index_is(re::find_method(re::find_type("offline.gui.SaveLoadBaseBehavior"), "set_SaveFileDetailList", {"System.Collections.Generic.List`1<via.storage.saveService.SaveFileDetail>"}), 211309), "SaveLoadBaseBehavior.set_SaveFileDetailList(SaveFileDetail>) is method 211309");
     check(re::enum_value(re::find_type("offline.gamemastering.SaveDataManager.SaveMode"), "SCENARIO", -1) == 1, "SaveDataManager.SaveMode.SCENARIO = 1");
     {
       // The delete is armed with one compare-exchange when the four request flags and SlotId are one qword.
@@ -442,33 +463,41 @@ int main(int argc, char** argv) {
             "SaveDataManager's four request flags and SlotId are one qword (+0x28..+0x2F): the delete's compare-exchange");
     }
     check_field("offline.gamemastering.SaveDataManager", "<LastDetailUserIndex>k__BackingField", 0x48);
-    check(re::find_method(re::find_type("via.storage.saveService.SaveService"), "updateSaveFileDetailTbl", {"via.UserIndex"}, true) == 344517, "SaveService.updateSaveFileDetailTbl(UserIndex) is static method 344517");
+    // Not in the dx11_non-rt build: there savefiles.cpp does what it does as field writes.
+    if (g_rt)
+      check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveService"), "updateSaveFileDetailTbl", {"via.UserIndex"}, true), 344517), "SaveService.updateSaveFileDetailTbl(UserIndex) is static method 344517");
+    else
+      check(re::find_type("via.storage.saveService.SaveService") &&
+                re::find_method(re::find_type("via.storage.saveService.SaveService"), "updateSaveFileDetailTbl", {"via.UserIndex"}, true) == 0,
+            "no SaveService.updateSaveFileDetailTbl in the dx11_non-rt build (the list is re-read by field writes)");
     check(re::find_method(re::find_type("via.storage.saveService.SaveService"), "updateSaveFileDetailTbl", {"via.UserIndex"}) == 0, "(and no instance method of the name)");
     check(re::enum_value(re::find_type("via.UserIndex"), "Reserved", -1) == 16, "via.UserIndex: User0-15, Reserved = 16");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_Slot", {}) == 153499, "SaveFileDetail.get_Slot() is method 153499");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_Title", {}) == 153493, "SaveFileDetail.get_Title() is method 153493");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_SubTitle", {}) == 153495, "SaveFileDetail.get_SubTitle() is method 153495");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_Detail", {}) == 153497, "SaveFileDetail.get_Detail() is method 153497");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_LastUpdateTimeStamp", {}) == 153500, "SaveFileDetail.get_LastUpdateTimeStamp() is method 153500");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_UseSize", {}) == 153502, "SaveFileDetail.get_UseSize() is method 153502");
-    check(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_InvalidSlot", {}) == 153505, "SaveFileDetail.get_InvalidSlot() is method 153505");
+    check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_Slot", {}), 153499), "SaveFileDetail.get_Slot() is method 153499");
+    check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_Title", {}), 153493), "SaveFileDetail.get_Title() is method 153493");
+    check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_SubTitle", {}), 153495), "SaveFileDetail.get_SubTitle() is method 153495");
+    check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_Detail", {}), 153497), "SaveFileDetail.get_Detail() is method 153497");
+    check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_LastUpdateTimeStamp", {}), 153500), "SaveFileDetail.get_LastUpdateTimeStamp() is method 153500");
+    check(g_rt ? index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_UseSize", {}), 153502)
+               : re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_UseSize", {}) == 0,
+          "SaveFileDetail.get_UseSize() is method 153502 (no sizes in the dx11_non-rt build)");
+    check(index_is(re::find_method(re::find_type("via.storage.saveService.SaveFileDetail"), "get_InvalidSlot", {}), 153505), "SaveFileDetail.get_InvalidSlot() is method 153505");
     check(re::find_type("System.Collections.Generic.List`1<via.storage.saveService.SaveFileDetail>") &&
               re::find_type("System.Collections.Generic.List`1<System.Collections.Generic.List`1<System.String>>") &&
               re::find_type("System.Collections.Generic.List`1<System.String>"),
           "List<SaveFileDetail>, List<List<String>> and List<String> are named");
-    check(re::find_method(re::find_type("System.String"), "get_Chars", {"System.Int32"}) == 316277, "String.get_Chars(Int32) is method 316277");
-    check(re::find_method(re::find_type("System.String"), "get_Length", {}) == 316272, "String.get_Length() is method 316272");
+    check(index_is(re::find_method(re::find_type("System.String"), "get_Chars", {"System.Int32"}), 316277), "String.get_Chars(Int32) is method 316277");
+    check(index_is(re::find_method(re::find_type("System.String"), "get_Length", {}), 316272), "String.get_Length() is method 316272");
   }
 
   // Freeze play time in the pause menu (game.cpp, events.cpp): the menu's frame, its
   // play time line, and the two calls PauseBehavior.open writes that line with.
   {
     const uint32_t m = re::find_method(re::find_type("offline.gui.PauseBehavior"), "update", {});
-    check(m == 63073 && re::method_vt_index(m) == 15, "PauseBehavior.update() is method 63073, virtual[15]");
+    check(index_is(m, 63073) && slot_is(re::method_vt_index(m), 15), "PauseBehavior.update() is method 63073, virtual[15]");
     check_field("offline.gui.PauseBehavior", "TextCurrentTime", 0xB8);
-    check(re::find_method(re::find_type("offline.gamemastering.MessageManager"), "getTimeStr", {"System.UInt64", "System.Boolean"}, true) == 89159,
+    check(index_is(re::find_method(re::find_type("offline.gamemastering.MessageManager"), "getTimeStr", {"System.UInt64", "System.Boolean"}, true), 89159),
           "MessageManager.getTimeStr(UInt64, Boolean) is static method 89159 (not its (Int32, Int32, Int32) overload)");
-    check(re::find_method(re::find_type("via.gui.Text"), "set_Message", {"System.String"}) == 6231, "via.gui.Text.set_Message(String) is method 6231");
+    check(index_is(re::find_method(re::find_type("via.gui.Text"), "set_Message", {"System.String"}), 6231), "via.gui.Text.set_Message(String) is method 6231");
   }
   // The pointer lines of the log (game.cpp): the game's own cursor requests.
   check_field("offline.InputSystem", "_Instance", 0x0, true);
@@ -485,9 +514,9 @@ int main(int argc, char** argv) {
   {
     const uint32_t ec = re::find_type("offline.EnemyController");
     const uint32_t idx = re::find_method(ec, "HitController_OnHitDamage", {"offline.Collision.HitController.DamageInfo"});
-    check(idx == 107906, "EnemyController.HitController_OnHitDamage(DamageInfo) is method 107906");
+    check(index_is(idx, 107906), "EnemyController.HitController_OnHitDamage(DamageInfo) is method 107906");
     const uintptr_t rec = re::method_record_at(idx);
-    const uintptr_t code_at = 8;  // where a method record keeps its code
+    const uintptr_t code_at = g_rt ? 8 : 0x18;  // where a method record keeps its code
 
     check(rec && re::method_at(rec) == "offline.EnemyController.HitController_OnHitDamage", "its entry names it");
     struct Fn {

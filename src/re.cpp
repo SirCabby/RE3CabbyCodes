@@ -14,20 +14,30 @@
 namespace re3cc::re {
 namespace {
 
-// --- the database's layout (TDB 70) ------------------------------------------------------
-// The current Steam build (24468913, the 2022 update's - ray tracing) has TDB 70
-// (REFramework's tdb70::TDB, RETypeDefVersion69): counts at 0x0C.., 18 array
-// pointers from 0x58, rewritten from offsets to addresses by the VM as it starts.
-// Names, counts and flags live in separate "impl" records the typedefs, fields
-// and methods point at; 18-bit type indices. The game's other versions - the
-// dx11_non-rt beta, the 2020 release - carry an older database, a layout the mod
-// does not read: it says so and leaves the game alone. Confirmed on re3.exe: every array
-// ends where the next begins, every typedef names itself, and fields, methods,
-// enum literals and generic names read back as tools/tdb_dump.py reads them.
+// --- the database's layouts (TDB 70 and TDB 67) ------------------------------------------
+// The current Steam build (24468913, the 2022 update's - ray tracing) has TDB 70;
+// the dx11_non-rt beta (11047294, the game before that update) has TDB 67. Same
+// magic, same idea - classes, fields, methods, a string pool and a byte pool, the
+// array pointers offsets from the header in the exe's copy, rewritten to addresses
+// by the VM as it starts - but different records:
+//  - TDB 70 (REFramework's tdb70::TDB, RETypeDefVersion69): counts at 0x0C..,
+//    18 array pointers from 0x58. Names, counts and flags live in separate "impl"
+//    records the typedefs, fields and methods point at; 18-bit type indices.
+//  - TDB 67 (tdb67::TDB, RETypeDefVersion67_RE3): RE2's dx11_non-rt layout (TDB 66,
+//    RE2CabbyCodes) with wider records - counts at 0x0C.., 13 array pointers from
+//    0x48 (modules, types, methods, fields, properties, events, -, params, init
+//    data, ?, strings, bytes, intern strings). No impl records: every record
+//    carries its own name and counts; 17-bit type indices. The init data is the
+//    array at 0x88, counted at 0x28, as in TDB 66.
+// Layouts confirmed on both exes: every array ends where the next begins, every
+// typedef names itself, and fields, methods, enum literals and generic names read
+// back as tools/tdb_dump.py reads them (tests/test_re.cpp). The 2020 release's
+// database is neither, and the mod says so and leaves the game alone.
 constexpr uint32_t kMagic = 0x00424454;  // "TDB\0"
-constexpr uint32_t kVersion = 70;        // build 24468913
+constexpr uint32_t kVersionRT = 70;      // build 24468913
+constexpr uint32_t kVersionDX11 = 67;    // build 11047294, the dx11_non-rt beta
 
-bool supported_version(uint32_t v) { return v == kVersion; }
+bool supported_version(uint32_t v) { return v == kVersionRT || v == kVersionDX11; }
 
 // RETypeDefVersion69 - the typedef every TDB 69/70 game uses (0x50 bytes).
 struct TypeDef {
@@ -41,6 +51,26 @@ struct TypeDef {
   uintptr_t managed_vt;  // the REObjectInfo of its instances
 };
 static_assert(sizeof(TypeDef) == 0x50, "TypeDef");
+
+// RETypeDefVersion67_RE3 (0x80): its name, counts and sizes on the typedef itself.
+struct TypeDef67 {
+  uint64_t a;  // index:17 ?:13 parent:17 declaring:17
+  uint32_t fqn, crc;
+  uint64_t pad10;
+  uint32_t name, ns, flags;
+  uint8_t system, pad25, object_type, pad27;
+  uint32_t ctor, field_size, size, pad34;
+  uint32_t member_method, num_methods, member_field, num_fields;
+  uint32_t props;  // num:12 first:19
+  uint32_t events, interfaces, pad54;
+  int32_t generics;
+  uint32_t vt;
+  uint64_t pad60;
+  uintptr_t unk68;
+  uintptr_t clr_type;
+  uintptr_t managed_vt;
+};
+static_assert(sizeof(TypeDef67) == 0x80, "TypeDef67");
 
 #pragma pack(push, 4)
 struct TypeImpl {
@@ -68,11 +98,31 @@ struct ParamDef {
   uint32_t w1;  // name:30 modifier:2
   uint32_t w2;  // type:18 flags:14
 };
+// tdb67::REField (0x18).
+struct Field67 {
+  uint64_t a;  // declaring:17 type:17 ?:30
+  uint32_t name;
+  uint16_t flags, init;
+  uint32_t offset;
+  uint32_t pad14;
+};
+// tdb67::REMethodDefinition (0x20): the code pointer at +0x18, set by the VM.
+struct Method67 {
+  uint64_t a;  // declaring:17 invoke:16 num_params:6 ?:8 return:17
+  uint16_t pad8;
+  int16_t vt_index;
+  uint32_t name;
+  uint16_t flags, impl_flags;
+  uint32_t params;  // byte pool: num_params tdb67::REMethodParamDef {type:17 flags:16 name:31}
+  uintptr_t code;
+};
 #pragma pack(pop)
 static_assert(sizeof(TypeImpl) == 0x30, "TypeImpl");
 static_assert(sizeof(MethodImpl) == 12, "MethodImpl");
 static_assert(sizeof(FieldImpl) == 12, "FieldImpl");
 static_assert(sizeof(ParamDef) == 12, "ParamDef");
+static_assert(sizeof(Field67) == 0x18, "Field67");
+static_assert(sizeof(Method67) == 0x20, "Method67");
 
 struct Db {
   uintptr_t base = 0;
@@ -83,6 +133,7 @@ struct Db {
   uintptr_t params = 0, init_data = 0, strings = 0, bytes = 0;
   // The records' sizes, and where a method keeps its code (what delegates copy).
   uint32_t type_size = sizeof(TypeDef), method_size = 16, field_size = 8, code_at = 8;
+  bool v67() const { return version == kVersionDX11; }
 } g;
 
 uintptr_t g_vm_slot = 0;
@@ -103,41 +154,53 @@ bool g_cache_cs_ready = false;
 
 const char* str(uint32_t off) { return off < g.n_strings ? reinterpret_cast<const char*>(g.strings + off) : ""; }
 
-// --- a typedef, a field and a method, read through their impl records ----------------------
+// --- one view of a typedef, a field and a method, whichever the layout --------------------
 uintptr_t td_at(uint32_t i) { return g.types + static_cast<uintptr_t>(i) * g.type_size; }
 const TypeDef* td(uint32_t i) { return reinterpret_cast<const TypeDef*>(td_at(i)); }
+const TypeDef67* td67(uint32_t i) { return reinterpret_cast<const TypeDef67*>(td_at(i)); }
 const TypeImpl* timpl(uint32_t i) {
   return i < g.n_type_impl ? reinterpret_cast<const TypeImpl*>(g.types_impl + static_cast<uintptr_t>(i) * sizeof(TypeImpl)) : nullptr;
 }
 const TypeImpl* td_impl(uint32_t i) { return timpl(static_cast<uint32_t>((td(i)->b >> 36) & 0x3FFFF)); }
 
-uint32_t td_index(uint32_t i) { return static_cast<uint32_t>(td(i)->a & 0x3FFFF); }
-uint32_t td_parent(uint32_t i) { return static_cast<uint32_t>((td(i)->a >> 18) & 0x3FFFF); }
-uint32_t td_declaring(uint32_t i) { return static_cast<uint32_t>((td(i)->a >> 36) & 0x3FFFF); }
-uint32_t td_objtype(uint32_t i) {  // via.clr's object type: 1 class, 3 string, 5 value type
-  return static_cast<uint32_t>((td(i)->a >> 61) & 7);
+uint32_t td_index(uint32_t i) {
+  return g.v67() ? static_cast<uint32_t>(td67(i)->a & 0x1FFFF) : static_cast<uint32_t>(td(i)->a & 0x3FFFF);
 }
-int32_t td_generics(uint32_t i) { return td(i)->generics; }
-uintptr_t td_managed_vt(uint32_t i) { return td(i)->managed_vt; }
+uint32_t td_parent(uint32_t i) {
+  return g.v67() ? static_cast<uint32_t>((td67(i)->a >> 30) & 0x1FFFF) : static_cast<uint32_t>((td(i)->a >> 18) & 0x3FFFF);
+}
+uint32_t td_declaring(uint32_t i) {
+  return g.v67() ? static_cast<uint32_t>((td67(i)->a >> 47) & 0x1FFFF) : static_cast<uint32_t>((td(i)->a >> 36) & 0x3FFFF);
+}
+uint32_t td_objtype(uint32_t i) {  // via.clr's object type: 1 class, 3 string, 5 value type
+  return g.v67() ? td67(i)->object_type : static_cast<uint32_t>((td(i)->a >> 61) & 7);
+}
+int32_t td_generics(uint32_t i) { return g.v67() ? td67(i)->generics : td(i)->generics; }
+uintptr_t td_managed_vt(uint32_t i) { return g.v67() ? td67(i)->managed_vt : td(i)->managed_vt; }
 const char* td_name(uint32_t i) {
+  if (g.v67()) return str(td67(i)->name);
   const TypeImpl* ti = td_impl(i);
   return ti ? str(static_cast<uint32_t>(ti->name)) : "";
 }
 const char* td_namespace(uint32_t i) {
+  if (g.v67()) return str(td67(i)->ns);
   const TypeImpl* ti = td_impl(i);
   return ti ? str(static_cast<uint32_t>(ti->ns)) : "";
 }
 uint32_t td_field_size(uint32_t i) {  // the fields' size: a value type's in an array
+  if (g.v67()) return td67(i)->field_size;
   const TypeImpl* ti = td_impl(i);
   return ti ? static_cast<uint32_t>(ti->field_size) : 0;
 }
-uint32_t first_field_of(uint32_t t) { return td(t)->member_field; }
+uint32_t first_field_of(uint32_t t) { return g.v67() ? td67(t)->member_field : td(t)->member_field; }
 uint32_t num_fields_of(uint32_t t) {
+  if (g.v67()) return td67(t)->num_fields;
   const TypeImpl* ti = td_impl(t);
   return ti && td(t)->member_field ? static_cast<uint32_t>(ti->num_fields) : 0;
 }
-uint32_t first_method_of(uint32_t t) { return td(t)->member_method; }
+uint32_t first_method_of(uint32_t t) { return g.v67() ? td67(t)->member_method : td(t)->member_method; }
 uint32_t num_methods_of(uint32_t t) {
+  if (g.v67()) return td67(t)->num_methods;
   const TypeImpl* ti = td_impl(t);
   return ti && td(t)->member_method ? ti->num_methods : 0;
 }
@@ -151,6 +214,17 @@ struct FieldView {
 FieldView field_view(uint32_t i) {
   FieldView v;
   if (i >= g.n_fields) return v;
+  if (g.v67()) {
+    const auto* f = reinterpret_cast<const Field67*>(g.fields + static_cast<uintptr_t>(i) * sizeof(Field67));
+    v.ok = true;
+    v.declaring = static_cast<uint32_t>(f->a & 0x1FFFF);
+    v.type = static_cast<uint32_t>((f->a >> 17) & 0x1FFFF);
+    v.offset = f->offset;
+    v.init = f->init;
+    v.flags = f->flags;
+    v.name = str(f->name);
+    return v;
+  }
   const uint64_t raw = *reinterpret_cast<const uint64_t*>(g.fields + static_cast<uintptr_t>(i) * 8);
   const uint32_t impl = static_cast<uint32_t>((raw >> 18) & 0xFFFFF);
   if (impl >= g.n_field_impl) return v;
@@ -176,6 +250,17 @@ uintptr_t method_at_index(uint32_t i) { return g.methods + static_cast<uintptr_t
 MethodView method_view(uint32_t i) {
   MethodView v;
   if (i >= g.n_methods) return v;
+  if (g.v67()) {
+    const auto* m = reinterpret_cast<const Method67*>(method_at_index(i));
+    v.ok = true;
+    v.declaring = static_cast<uint32_t>(m->a & 0x1FFFF);
+    v.vt_index = m->vt_index;
+    v.nparams = static_cast<uint32_t>((m->a >> 33) & 0x3F);
+    v.params = m->params;
+    v.flags = m->flags;
+    v.name = str(m->name);
+    return v;
+  }
   const uint64_t raw = *reinterpret_cast<const uint64_t*>(method_at_index(i));
   const uint32_t impl = static_cast<uint32_t>((raw >> 18) & 0xFFFFF);
   if (impl >= g.n_method_impl) return v;
@@ -193,6 +278,10 @@ MethodView method_view(uint32_t i) {
 // The class of parameter k of a method (0 when it cannot be read).
 uint32_t param_type(const MethodView& m, uint32_t k) {
   if (k >= m.nparams) return 0;
+  if (g.v67()) {
+    if (m.params + (k + 1) * 8ull > g.n_bytes) return 0;
+    return static_cast<uint32_t>(mem::read<uint64_t>(g.bytes + m.params + k * 8ull) & 0x1FFFF);
+  }
   if (m.params + 8 + (k + 1) * 4ull > g.n_bytes) return 0;
   const uint32_t p = mem::read<uint32_t>(g.bytes + m.params + 8 + k * 4ull);
   if (p >= g.n_params) return 0;
@@ -213,32 +302,54 @@ bool read_header(uintptr_t base, Db* out) {
   d.n_types = u32(0x0C);
   d.n_methods = u32(0x10);
   d.n_fields = u32(0x14);
-  d.n_type_impl = u32(0x18);
-  d.n_field_impl = u32(0x1C);
-  d.n_method_impl = u32(0x20);
-  d.n_params = u32(0x30);
-  d.n_init = u32(0x38);
-  d.n_strings = u32(0x50);
-  d.n_bytes = u32(0x54);
-  d.types = u64(0x60);
-  d.types_impl = u64(0x68);
-  d.methods = u64(0x70);
-  d.methods_impl = u64(0x78);
-  d.fields = u64(0x80);
-  d.fields_impl = u64(0x88);
-  d.params = u64(0xA8);
-  d.init_data = u64(0xB8);
-  d.strings = u64(0xD0);
-  d.bytes = u64(0xD8);
-  if (d.n_types > 0x3FFFF) return false;
+  if (d.v67()) {
+    d.n_params = u32(0x24);
+    d.n_init = u32(0x28);
+    d.n_strings = u32(0x40);
+    d.n_bytes = u32(0x44);
+    d.types = u64(0x50);
+    d.methods = u64(0x58);
+    d.fields = u64(0x60);
+    d.params = u64(0x80);
+    d.init_data = u64(0x88);
+    d.strings = u64(0x98);
+    d.bytes = u64(0xA0);
+    d.type_size = sizeof(TypeDef67);
+    d.method_size = sizeof(Method67);
+    d.field_size = sizeof(Field67);
+    d.code_at = offsetof(Method67, code);
+    if (d.n_types > 0x1FFFF) return false;
+  } else {
+    d.n_type_impl = u32(0x18);
+    d.n_field_impl = u32(0x1C);
+    d.n_method_impl = u32(0x20);
+    d.n_params = u32(0x30);
+    d.n_init = u32(0x38);
+    d.n_strings = u32(0x50);
+    d.n_bytes = u32(0x54);
+    d.types = u64(0x60);
+    d.types_impl = u64(0x68);
+    d.methods = u64(0x70);
+    d.methods_impl = u64(0x78);
+    d.fields = u64(0x80);
+    d.fields_impl = u64(0x88);
+    d.params = u64(0xA8);
+    d.init_data = u64(0xB8);
+    d.strings = u64(0xD0);
+    d.bytes = u64(0xD8);
+    if (d.n_types > 0x3FFFF) return false;
+  }
   if (!d.n_types || !d.n_methods || !d.n_fields || !d.n_strings || !d.n_bytes) return false;
   *out = d;
   return true;
 }
 
-// The header's array pointers: none may still be an offset once the VM has
-// loaded the database.
-constexpr int kFirstArray = 0x58, kArrays = 18;
+// The header's array pointers, as a version lays them out: none may still be an
+// offset once the VM has loaded the database.
+int array_pointers(uint32_t version, int* first) {
+  *first = version == kVersionDX11 ? 0x48 : 0x58;
+  return version == kVersionDX11 ? 13 : 18;
+}
 
 // Every array the mod reads must be where the header says, whole.
 bool arrays_readable(const Db& d) {
@@ -247,6 +358,7 @@ bool arrays_readable(const Db& d) {
                       mem::readable(d.fields, static_cast<size_t>(d.n_fields) * d.field_size) &&
                       mem::readable(d.init_data, static_cast<size_t>(d.n_init) * 4) &&
                       mem::readable(d.strings, d.n_strings) && mem::readable(d.bytes, d.n_bytes);
+  if (d.v67()) return common;
   return common && mem::readable(d.types_impl, static_cast<size_t>(d.n_type_impl) * sizeof(TypeImpl)) &&
          mem::readable(d.methods_impl, static_cast<size_t>(d.n_method_impl) * sizeof(MethodImpl)) &&
          mem::readable(d.fields_impl, static_cast<size_t>(d.n_field_impl) * sizeof(FieldImpl)) &&
@@ -264,12 +376,14 @@ bool self_check(char* why, size_t n) {
       std::snprintf(why, n, "typedef %u says it is %u", i, idx);
       return false;
     }
-    if (!td_impl(i)) {
+    if (!g.v67() && !td_impl(i)) {
       std::snprintf(why, n, "typedef %u has impl %u of %u", i, static_cast<uint32_t>((td(i)->b >> 36) & 0x3FFFF),
                     g.n_type_impl);
       return false;
     }
-    if (!*td_name(i)) {
+    // An array type (object type 2) has no name of its own in TDB 67 - 5 747 of
+    // them in build 11047294, half way through the table among them.
+    if (!*td_name(i) && td_objtype(i) != 2) {
       std::snprintf(why, n, "typedef %u has no name", i);
       return false;
     }
@@ -298,12 +412,13 @@ const std::string& build_name(uint32_t i, int depth) {
     full += nm;
   }
   // A generic instance: "List`1<offline.inventory.Slot>". Its argument list
-  // in the byte pool: {definition:18 num:14; u32 types[num]}.
+  // in the byte pool: {definition:18 num:14; u32 types[num]} in TDB 70,
+  // {definition:17 num:14; u32 types[num]} in TDB 67.
   const int32_t generics = td_generics(i);
   if (generics > 0 && static_cast<uint32_t>(generics) + 4 <= g.n_bytes) {
     const uintptr_t gl = g.bytes + static_cast<uint32_t>(generics);
     const uint32_t w = mem::read<uint32_t>(gl);
-    const uint32_t def = w & 0x3FFFF, num = w >> 18;
+    const uint32_t def = g.v67() ? (w & 0x1FFFF) : (w & 0x3FFFF), num = g.v67() ? ((w >> 17) & 0x3FFF) : (w >> 18);
     if (def != i && num > 0 && num <= 16 && static_cast<uint32_t>(generics) + 4 + num * 4 <= g.n_bytes) {
       full += '<';
       for (uint32_t k = 0; k < num; ++k) {
@@ -318,15 +433,20 @@ const std::string& build_name(uint32_t i, int depth) {
   return slot;
 }
 
+// A database that fails is let go again (g cleared): init() attaches whenever
+// g.base is not the VM's database, so one kept would pass for attached on the
+// next try, with no names built.
 bool attach(const Db& d) {
   g = d;
   char why[160] = "";
   if (!arrays_readable(g)) {
     std::snprintf(g_status, sizeof(g_status), "type database arrays not readable");
+    g = Db{};
     return false;
   }
   if (!self_check(why, sizeof(why))) {
     std::snprintf(g_status, sizeof(g_status), "type database failed its self-check: %s", why);
+    g = Db{};
     return false;
   }
   g_names.assign(g.n_types, std::string());
@@ -365,7 +485,7 @@ uintptr_t find_vm_slot(const mem::Range& text, const mem::Range& image) {
   return 0;
 }
 
-// The database in the image, found by its header: magic, version 70.
+// The database in the image, found by its header: magic, version 70 or 67.
 uintptr_t find_tdb_in_image(const mem::Range& data) {
   const auto* p = reinterpret_cast<const uint8_t*>(data.begin);
   const auto* end = reinterpret_cast<const uint8_t*>(data.end) - 0x100;
@@ -419,7 +539,7 @@ bool init() {
   if (text.empty() || data.empty()) {
     std::snprintf(g_status, sizeof(g_status),
                   "re3.exe has no .text/.data section: not a version of the game the mod can read (it works with the "
-                  "current Steam version, build 24468913)");
+                  "current Steam version, build 24468913, and the dx11_non-rt beta, build 11047294)");
     g_unsupported = true;
     return false;
   }
@@ -430,18 +550,20 @@ bool init() {
       const uint32_t other = other_tdb_version(data);
       if (other)
         std::snprintf(g_status, sizeof(g_status),
-                      "re3.exe's type database is v%u, not v70: a version of the game the mod was not made for (it "
-                      "works with the current Steam version, build 24468913 - not the dx11_non-rt beta)",
+                      "re3.exe's type database is v%u, not v70 or v67: a version of the game the mod was not made for "
+                      "(it works with the current Steam version, build 24468913, and the dx11_non-rt beta, build "
+                      "11047294)",
                       other);
       else
         std::snprintf(g_status, sizeof(g_status),
                       "no type database in re3.exe's .data: not a version of the game the mod can read (it works with "
-                      "the current Steam version, build 24468913)");
+                      "the current Steam version, build 24468913, and the dx11_non-rt beta, build 11047294)");
       g_unsupported = true;
       return false;
     }
-    logf("re: TDB v%u header in .data at exe+0x%llX", mem::read<uint32_t>(s_image_tdb + 4),
-         static_cast<unsigned long long>(s_image_tdb - image.begin));
+    logf("re: TDB v%u header in .data at exe+0x%llX (%s)", mem::read<uint32_t>(s_image_tdb + 4),
+         static_cast<unsigned long long>(s_image_tdb - image.begin),
+         mem::read<uint32_t>(s_image_tdb + 4) == kVersionDX11 ? "the dx11_non-rt build" : "the ray-tracing build");
   }
   if (!g_vm_slot) {
     g_vm_slot = find_vm_slot(text, image);
@@ -477,8 +599,10 @@ bool init() {
   // The VM's loader turns every array offset in the header into an address, in
   // place, and sets no flag while it does - the header's `initialized` stays 0. So
   // "loaded" is read off the arrays themselves: none of them may still be an offset.
-  for (int i = 0; i < kArrays; ++i) {
-    const uint64_t p = mem::read<uint64_t>(tdb + kFirstArray + 8 * static_cast<uintptr_t>(i));
+  int first_array = 0;
+  const int arrays = array_pointers(version, &first_array);
+  for (int i = 0; i < arrays; ++i) {
+    const uint64_t p = mem::read<uint64_t>(tdb + first_array + 8 * static_cast<uintptr_t>(i));
     if (p && p < tdb) {
       std::snprintf(g_status, sizeof(g_status), "waiting for the VM to load the type database (array %d is still an offset)", i);
       return false;
@@ -498,7 +622,7 @@ bool init() {
          g.n_types, g.n_methods, g.n_fields, mem::read<uint32_t>(tdb + 8));
   }
   // The static table: {u8** elements; u32 size}, 0x30 bytes before the database
-  // pointer in TDB 70 (REFramework). Failing that, REFramework's fix-up for later
+  // pointer in TDB 70 (REFramework; RE2's TDB 66 too). Failing that, REFramework's fix-up for later
   // versions: the first of two {pointer, count} pairs of the same count below it
   // (the static blocks, and the table of which of them are initialised).
   auto table_at = [&](int off, uintptr_t* elems, uint32_t* size) {
@@ -580,7 +704,13 @@ bool derives(uint32_t t, uint32_t base) {
 
 uint32_t value_size(uint32_t t) { return t && t < g.n_types ? td_field_size(t) : 0; }
 
-uintptr_t managed_vt(uint32_t t) { return t && t < g.n_types ? td_managed_vt(t) : 0; }
+// Only an REObjectInfo that points back at t's typedef (its first qword, what
+// type_of reads off every object): in TDB 67 the typedef's pointer to it is a
+// run-time field no file on disk shows set, so it is checked as it is read.
+uintptr_t managed_vt(uint32_t t) {
+  const uintptr_t info = t && t < g.n_types ? td_managed_vt(t) : 0;
+  return info && mem::read_ptr(info) == td_at(t) ? info : 0;
+}
 
 uint32_t tdb_version() { return g.version; }
 
@@ -786,7 +916,7 @@ static bool is_method_record(uintptr_t record) {
 uintptr_t method_record_at(uint32_t index) { return g_ready && index < g.n_methods ? method_at_index(index) : 0; }
 
 // A method's code pointer - the one delegates are made from - is the record's
-// second qword.
+// second qword in TDB 70 and its fourth in TDB 67.
 uintptr_t hook_method(uintptr_t record, uintptr_t replacement, unsigned long* protect) {
   if (protect) *protect = 0;
   if (!is_method_record(record) || !replacement) return 0;

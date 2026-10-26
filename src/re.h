@@ -6,8 +6,8 @@
 
 // RE Engine's own reflection, read directly: the type database the game's
 // managed runtime (via.clr) keeps every class, field and method in - TDB v70 in
-// the current Steam build (24468913) - and the VM's table of static field
-// blocks. Everything the mod knows about the
+// the current Steam build (24468913), TDB v67 in the dx11_non-rt beta (11047294)
+// - and the VM's table of static field blocks. Everything the mod knows about the
 // game's objects comes through here by name - classes by full name, fields by
 // name up the class chain, singletons through their static `_Instance` field -
 // so nothing in the mod is an absolute address or a hard-coded field offset.
@@ -23,12 +23,12 @@ namespace re3cc::re {
 // --- set-up (mod thread) ----------------------------------------------------------
 bool init();        // false = not yet (the VM is not up); call again later
 bool ready();
-// re3.exe carries no TDB 70 - another version of the game (the dx11_non-rt beta,
-// the 2020 release): init() will never succeed, and status() says so for the player.
+// re3.exe carries no TDB 70 or 67 - another version of the game (the 2020
+// release): init() will never succeed, and status() says so for the player.
 bool unsupported();
 const char* status();
 bool attach_tdb(uintptr_t tdb);  // tests: use an (initialised) database without a VM
-uint32_t tdb_version();           // 70 once attached (0 before)
+uint32_t tdb_version();           // 70 or 67 once attached (0 before)
 
 uint32_t num_types();
 uint32_t num_methods();

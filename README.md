@@ -149,9 +149,11 @@ sit beside REFramework.
 
 ## Install
 
-The mod is made for the current Steam version of the game (the default branch, build 24468913). The
-`dx11_non-rt` beta is an older version of the game, which the mod does not read: there it says so and
-leaves the game alone.
+The mod works with both Steam versions of the game: the current one (the default branch, build
+24468913, with ray tracing) and the older one without ray tracing (the `dx11_non-rt` beta in the game's
+*Properties*, *Betas*, build 11047294). Switching between them in Steam replaces the game's
+`steam_api64.dll` - the mod's included - so after a switch delete `steam_api64_orig.dll` (the other
+version's) and do steps 2 and 3 again.
 
 1. Open the game's folder (in Steam: right-click the game, *Manage*, *Browse local files*) - the one
    containing `re3.exe`.
@@ -173,11 +175,13 @@ The mod says what is wrong - in a message box as the game starts, or in the pane
   the game came with, and the game cannot run with it. Delete `steam_api64_orig.dll` first - verifying
   the game files leaves it where it is - then the same fix: verify the game files, and steps 2 and 3.
 - *RE3CabbyCodes does not work with this version of Resident Evil 3*, or in the panel *a version of
-  the game the mod was not made for* - not build 24468913 (the `dx11_non-rt` beta, or a future update).
-  Set *Betas* to *None*, or uninstall the mod. The mod leaves that version of the game alone.
+  the game the mod was not made for* - neither of the two versions above (a future update, say). Set
+  *Betas* to *None*, or uninstall the mod. The mod leaves that version of the game alone.
 
 A `steam_api64.dll` that is not the game's own but has every function the game uses still works as
-the original, and the log notes it. For anything else, send `RE3CabbyCodes.log` and
+the original, and the log notes it. On the `dx11_non-rt` beta the game's own is an older Steam DLL than
+the current version's, and the log lists the 238 functions it lacks - none of which the game uses. For
+anything else, send `RE3CabbyCodes.log` and
 `RE3CabbyCodes.prev.log` from the game's folder - the files themselves: they are the record of what
 the mod found.
 
@@ -197,9 +201,12 @@ the mod found.
   shares - and saves it at once. Back it up before trying it (the whole `win64_save` folder).
 - The save files' Delete and Copy change your saves (and Steam Cloud) at once and cannot be undone:
   back up the `win64_save` folder before trying them.
-- Everything the mod uses is found by name in the game's own type information, so in a build where
-  something is missing, that feature is greyed out with the reason beside it, and the log says what
-  was missing.
+- Two Steam builds have been looked at: the current one (24468913) and the `dx11_non-rt` beta
+  (11047294, April 2023). Everything the mod uses is found by name in the game's own type information,
+  so in a build where something is missing, that feature is greyed out with the reason beside it, and
+  the log says what was missing. On the `dx11_non-rt` version God mode and One hit kills are heard at
+  other points of the game's code than on the current version, so they are that version's newest parts:
+  report anything odd with the log.
 
 ## Config
 
@@ -229,8 +236,8 @@ the clock, the inventory, the item box), the fields it reads and writes, and the
 the game's enumerations. Nothing is a fixed address or a hard-coded offset. The cheats act only when the
 game does - an enemy or the player hit, a shot, a save, the item box opening, the inventory screen's and
 the shortcuts' frames - because the mod points the game's own tables (the entries delegates are made
-from, the vtables of a few classes) at small functions that do the cheat's work around the game's
-original code. No code is patched. The item
+from, the vtables of a few classes; on the `dx11_non-rt` beta, vtables only) at small functions that do
+the cheat's work around the game's original code. No code is patched. The item
 box's Take and Store, the weapons the inventory editor puts in and takes out, the difficulty switch and
 the records panel's Steam achievements are the only places the mod calls the game, each through the
 game's own function. The records panel knows its screen is up from that screen's own frame, the save

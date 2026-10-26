@@ -110,6 +110,18 @@ struct Code {
   int32_t first = -1, count = 0;
   uintptr_t set_details = 0;  // SaveLoadBaseBehavior.set_SaveFileDetailList: a reference store the VM counts
   uintptr_t refresh = 0;      // SaveService.updateSaveFileDetailTbl(via.UserIndex), static
+  // The dx11_non-rt build has no updateSaveFileDetailTbl. What it does in the current
+  // build - the native service's "fresh" counter to -1, then the native refresh - is
+  // done there as two writes: that counter, and SaveDataManager.<LastDetailUserIndex>
+  // to -1, so the game's own getSaveFileDetailList calls the refresh the next time the
+  // screen asks for the list. Both read out of getSaveFileDetailList's code.
+  uintptr_t service_slot = 0;  // the global holding the native save service
+  int32_t fresh_off = -1;      // its counter (+0x74 in build 11047294)
+  // The dx11_non-rt build keeps the three texts as the engine's own UTF-16 strings,
+  // not managed ones (savefiles_rules.h, native_text_getter): title/subtitle/detail
+  // are then where those sit, laid out as `native`.
+  bool native_texts = false;
+  rules::NativeText native;
 };
 Code C;
 std::atomic<bool> g_code_ok{false};
@@ -253,6 +265,44 @@ int32_t chars_offset(uintptr_t code) {
   return code && mem::copy_from(b, code, sizeof(b)) ? rules::chars_offset(b, sizeof(b)) : -1;
 }
 
+// A text getter: a managed string's reference at +off (the current build), or the
+// engine's own UTF-16 string at +off (the dx11_non-rt build: `native` filled).
+int32_t text_offset(uintptr_t code, rules::NativeText* native, bool* is_native) {
+  const int32_t off = getter_offset(code, true);
+  if (off > 0 || !code) return off;
+  uint8_t b[64] = {};
+  if (!mem::copy_from(b, code, sizeof(b)) || !rules::native_text_getter(b, sizeof(b), native)) return -1;
+  *is_native = true;
+  return native->offset;
+}
+
+// The dx11_non-rt build's list refresh (Code::service_slot, fresh_off), out of
+// SaveDataManager.getSaveFileDetailList's code: `mov rcx,[rip+service]; mov edx,eax;
+// call refresh` (made when the current user is not <LastDetailUserIndex>), and in that
+// native refresh the counter it compares and stores - `cmp esi,[rbx+off] ... mov
+// [rbx+off],esi` - its "the table is fresh" test.
+void find_list_refresh(Code* c) {
+  const HMODULE exe = GetModuleHandleA(nullptr);
+  const mem::Range text = mem::section(exe, ".text"), data = mem::section(exe, ".data");
+  const char* const kMode = "offline.gamemastering.SaveDataManager.SaveMode";
+  const uintptr_t list = S.mgr ? re::method_code_typed(S.mgr, "getSaveFileDetailList", {kMode}) : 0;
+  for (uintptr_t p = list; list && p < list + 0x100 && !c->service_slot; ++p) {
+    if (!mem::matches(p, "48 8B 0D ?? ?? ?? ?? 8B D0 E8")) continue;
+    const uintptr_t slot = mem::rip_target(p, 3, 7), refresh = mem::rip_target(p + 9, 1, 5);
+    if (!data.contains(slot) || !text.contains(refresh)) continue;
+    for (uintptr_t q = refresh; q < refresh + 0x100 && c->fresh_off < 0; ++q) {
+      if (!mem::matches(q, "3B 73 ??")) continue;
+      const uint8_t off = mem::read<uint8_t>(q + 2);
+      for (uintptr_t r = q + 3; r < q + 0x60; ++r)
+        if (mem::matches(r, "89 73 ??") && mem::read<uint8_t>(r + 2) == off) {
+          c->fresh_off = off;
+          c->service_slot = slot;
+          break;
+        }
+    }
+  }
+}
+
 // A static method of SaveDataManager over the SaveMode (a jump table), run for
 // the main game's list without calling it (switch_eval.h): the mode in rdx, the
 // offset (when it takes one) in r8.
@@ -274,14 +324,24 @@ bool resolve_code(bool log_failure) {
   Code c;
   auto getter = [](const char* name) { return T.detail ? re::method_code(T.detail, name, 0) : 0; };
   c.slot = getter_offset(getter("get_Slot"), false);
-  // The three texts: a managed string's reference each.
-  c.title = getter_offset(getter("get_Title"), true);
-  c.subtitle = getter_offset(getter("get_SubTitle"), true);
-  c.detail = getter_offset(getter("get_Detail"), true);
+  // The three texts: a managed string's reference each, or (the dx11_non-rt build)
+  // the engine's own strings.
+  bool native[3] = {};
+  rules::NativeText layout3[3];
+  c.title = text_offset(getter("get_Title"), &layout3[0], &native[0]);
+  c.subtitle = text_offset(getter("get_SubTitle"), &layout3[1], &native[1]);
+  c.detail = text_offset(getter("get_Detail"), &layout3[2], &native[2]);
+  // All three one kind; native ones laid out alike.
+  const bool same_kind = native[0] == native[1] && native[1] == native[2] &&
+                         (!native[0] || (layout3[0].length == layout3[1].length && layout3[1].length == layout3[2].length &&
+                                         layout3[0].capacity == layout3[2].capacity &&
+                                         layout3[0].inline_below == layout3[2].inline_below));
+  c.native_texts = native[0];
+  c.native = layout3[0];
   c.stamp = getter_offset(getter("get_LastUpdateTimeStamp"), true);
   c.use_size = getter_offset(getter("get_UseSize"), true);
   const bool invalid = getter_constant(getter("get_InvalidSlot"), &c.invalid_slot);
-  const bool details = c.slot > 0 && c.title > 0 && c.subtitle > 0 && c.detail > 0 && c.stamp > 0 && invalid;
+  const bool details = c.slot > 0 && c.title > 0 && c.subtitle > 0 && c.detail > 0 && c.stamp > 0 && invalid && same_kind;
   c.length = getter_offset(T.string ? re::method_code(T.string, "get_Length", 0) : 0, false);
   c.chars = chars_offset(T.string ? re::method_code_typed(T.string, "get_Chars", {"System.Int32"}) : 0);
   const bool strings = c.length > 0 && c.chars > 0;
@@ -293,16 +353,25 @@ bool resolve_code(bool log_failure) {
   c.set_details = re::method_code_typed(Scr.base, "set_SaveFileDetailList",
                                         {"System.Collections.Generic.List`1<via.storage.saveService.SaveFileDetail>"});
   c.refresh = g_service ? re::method_code_typed(g_service, "updateSaveFileDetailTbl", {"via.UserIndex"}, true) : 0;
-  const bool ok = details && strings && layout && c.set_details && c.refresh;
+  if (!c.refresh) find_list_refresh(&c);
+  const bool ok = details && strings && layout && c.set_details && (c.refresh || (c.service_slot && c.fresh_off > 0));
   const uintptr_t base = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
   auto rva = [base](uintptr_t a) { return a > base ? static_cast<unsigned long long>(a - base) : 0ull; };
-  if (ok || log_failure)
-    logf("save files: %s: details %d (slot +0x%X, strings +0x%X/+0x%X/+0x%X, stamp +0x%X, size +0x%X (-1: none), empty = 0x%X), "
-         "strings %d (+0x%X/+0x%X), the main game's list %d (slots %d-%d), set_SaveFileDetailList exe+0x%llX, "
-         "SaveService.updateSaveFileDetailTbl exe+0x%llX",
+  if (ok || log_failure) {
+    char how[128];
+    if (c.refresh) std::snprintf(how, sizeof(how), "SaveService.updateSaveFileDetailTbl exe+0x%llX", rva(c.refresh));
+    else std::snprintf(how, sizeof(how), "the list re-read by field writes (the save service at [exe+0x%llX], its counter +0x%X)",
+                       rva(c.service_slot), static_cast<uint32_t>(c.fresh_off));
+    char kind[96] = "";
+    if (c.native_texts)
+      std::snprintf(kind, sizeof(kind), " (the engine's own UTF-16: length +0x%X, capacity +0x%X, inline below %d)",
+                    static_cast<uint32_t>(c.native.length), static_cast<uint32_t>(c.native.capacity), c.native.inline_below);
+    logf("save files: %s: details %d (slot +0x%X, strings +0x%X/+0x%X/+0x%X%s, stamp +0x%X, size +0x%X (-1: none), empty = 0x%X), "
+         "strings %d (+0x%X/+0x%X), the main game's list %d (slots %d-%d), set_SaveFileDetailList exe+0x%llX, %s",
          ok ? "the game's code read" : "ERROR: the game's code not understood after a minute (still trying)", details,
-         c.slot, c.title, c.subtitle, c.detail, c.stamp, c.use_size, static_cast<uint32_t>(c.invalid_slot), strings,
-         c.length, c.chars, layout, c.first, c.first + c.count - 1, rva(c.set_details), rva(c.refresh));
+         c.slot, c.title, c.subtitle, c.detail, kind, c.stamp, c.use_size, static_cast<uint32_t>(c.invalid_slot), strings,
+         c.length, c.chars, layout, c.first, c.first + c.count - 1, rva(c.set_details), how);
+  }
   if (!ok) return false;
   C = c;
   set_status("");
@@ -344,9 +413,35 @@ bool read_string(uintptr_t s, char* out, size_t n) {
   return true;
 }
 
-// A detail's text at +off: a managed string.
+// The engine's own UTF-16 string at `at` (the dx11_non-rt build's detail texts,
+// C.native): its characters inline while its capacity is below the inline size,
+// else behind a pointer in the same place.
+bool read_native_text(uintptr_t at, char* out, size_t n) {
+  if (n) out[0] = '\0';
+  int32_t len = 0, cap = 0;
+  if (!mem::read_safe(at + static_cast<uintptr_t>(C.native.length), &len) ||
+      !mem::read_safe(at + static_cast<uintptr_t>(C.native.capacity), &cap) || len < 0 || len > 4096 || cap < len)
+    return false;
+  const uintptr_t chars = cap >= C.native.inline_below ? mem::read_ptr(at) : at;
+  wchar_t w[512];
+  const int take = len < 511 ? len : 511;
+  if (take && (!chars || !mem::copy_from(w, chars, static_cast<size_t>(take) * 2))) return false;
+  char u[1600];
+  const int got = take ? WideCharToMultiByte(CP_UTF8, 0, w, take, u, sizeof(u) - 1, nullptr, nullptr) : 0;
+  size_t m = got > 0 ? static_cast<size_t>(got) : 0;
+  if (m >= n) {
+    m = n - 1;
+    while (m > 0 && (static_cast<uint8_t>(u[m]) & 0xC0) == 0x80) --m;  // not inside a character
+  }
+  std::memcpy(out, u, m);
+  out[m] = '\0';
+  return true;
+}
+
+// A detail's text at +off, whichever kind the build keeps.
 bool read_detail_text(uintptr_t detail, int32_t off, char* out, size_t n) {
-  return read_string(mem::read_ptr(detail + static_cast<uintptr_t>(off)), out, n);
+  return C.native_texts ? read_native_text(detail + static_cast<uintptr_t>(off), out, n)
+                        : read_string(mem::read_ptr(detail + static_cast<uintptr_t>(off)), out, n);
 }
 
 // One row of the list (slot `slot`): the engine's detail of the slot (null: no
@@ -449,13 +544,26 @@ uintptr_t save_manager();
 // its own update reads the table again and rebuilds its rows. From the hook: the
 // screen's own thread, inside the game's frame (ctx is the hook's).
 void refresh(uintptr_t ctx, uintptr_t screen) {
-  if (!C.set_details || !C.refresh) {
+  if (!C.set_details || (!C.refresh && (!C.service_slot || C.fresh_off <= 0))) {
     g_refresh_broken = true;
     logf("ERROR: save files: the refresh calls are not there - no more refreshes this session");
     return;
   }
   const int user = g_refresh_user.load();
-  if (user >= 0 && user < g_user_count) {
+  if (!C.refresh) {
+    // The dx11_non-rt build: the table marked stale, and the manager's last user
+    // forgotten, so its getSaveFileDetailList - asked by the screen, once its list is
+    // dropped below - calls the native refresh with the current user, and it re-reads.
+    const uintptr_t sdm = save_manager();
+    const uintptr_t service = mem::read_ptr(C.service_slot);
+    const uintptr_t user_at = sdm ? re::field_addr(sdm, S.f_user) : 0;
+    if (!service || !user_at || !mem::store<int32_t>(service + static_cast<uintptr_t>(C.fresh_off), -1) ||
+        !mem::store<int32_t>(user_at, -1)) {
+      g_refresh_broken = true;
+      logf("ERROR: save files: the save service or the save manager could not be written - no more refreshes this session");
+      return;
+    }
+  } else if (user >= 0 && user < g_user_count) {
     reinterpret_cast<void (*)(uintptr_t, int32_t)>(C.refresh)(ctx, user);
     if (call::exception_pending(ctx)) {
       g_refresh_broken = true;
@@ -1046,10 +1154,10 @@ bool discover() {
   S.ok = S.mgr && S.inst.valid() && S.f_save.valid() && S.f_load.valid() && S.f_remove.valid() &&
          S.f_remove_all.valid() && S.f_slot.valid() && S.f_step.valid() && S.f_user.valid() && mode && layout;
   g_service = need_type("via.storage.saveService.SaveService");
-  if (!g_service || !re::find_method(g_service, "updateSaveFileDetailTbl", {"via.UserIndex"}, true)) {
-    logf("save files: SaveService.updateSaveFileDetailTbl(UserIndex) not found - the list cannot be read again");
-    ++g_missing;
-  }
+  // Not in the dx11_non-rt build: there the list is re-read by field writes (find_list_refresh).
+  if (g_service && !re::find_method(g_service, "updateSaveFileDetailTbl", {"via.UserIndex"}, true))
+    logf("save files: SaveService.updateSaveFileDetailTbl(UserIndex) is not in this build - the game's list is read "
+         "again by field writes (SaveDataManager.getSaveFileDetailList's own refresh)");
   if (const uint32_t u = re::find_type("via.UserIndex")) g_user_count = re::enum_value(u, "Reserved", g_user_count);
 
   // Steam's remote storage: the original DLL's flat API.

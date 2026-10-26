@@ -86,7 +86,7 @@ def main():
     ap.add_argument("--game", required=True)
     ap.add_argument("--out", required=True)
     a = ap.parse_args()
-    tdb = TDB(PE(os.path.join(a.game, "re3.exe")))
+    tdb = TDB.open(PE(os.path.join(a.game, "re3.exe")))
 
     def enum(name):
         t = tdb.find_type(name)
