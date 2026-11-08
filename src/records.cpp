@@ -14,6 +14,7 @@
 #include "re.h"
 #include "records_rules.h"
 #include "records_text.h"
+#include "stamp.h"
 
 namespace re3cc::records {
 namespace {
@@ -219,8 +220,8 @@ char g_status[200] = {};
 bool g_status_error = false;
 
 // The screen's frames (its hook, on the game's threads): when it was last seen,
-// and last seen taking input; where its EnableInput_ is, worked out once per
-// screen object.
+// and last seen taking input (moments, stamp.h); where its EnableInput_ is,
+// worked out once per screen object.
 std::atomic<DWORD> g_screen_seen{0}, g_screen_input{0};
 std::atomic<uintptr_t> g_screen_obj{0}, g_screen_input_at{0};
 
@@ -825,16 +826,16 @@ void screen_frame(uintptr_t behaviour) {
   }
   uint8_t input = 1;
   if (at && !mem::read_safe(at, &input)) input = 0;
-  const DWORD now = GetTickCount() | 1;
-  g_screen_seen.store(now, std::memory_order_relaxed);
-  if (input) g_screen_input.store(now, std::memory_order_relaxed);
+  const DWORD now = stamp::now();
+  g_screen_seen.store(now, std::memory_order_release);
+  if (input) g_screen_input.store(now, std::memory_order_release);
 }
 
+// Its frames lately, taking input. The moments are loaded before the clock is
+// read (stamp.h).
 bool screen_open() {
-  const DWORD now = GetTickCount();
-  const DWORD seen = g_screen_seen.load(std::memory_order_relaxed);
-  const DWORD input = g_screen_input.load(std::memory_order_relaxed);
-  return seen && now - seen < 400 && input && now - input < 400;
+  return stamp::within(g_screen_seen.load(std::memory_order_acquire), 400) &&
+         stamp::within(g_screen_input.load(std::memory_order_acquire), 400);
 }
 
 View view() {

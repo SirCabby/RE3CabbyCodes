@@ -16,6 +16,7 @@
 #include "re.h"
 #include "records.h"
 #include "savefiles.h"
+#include "stamp.h"
 
 namespace re3cc::events {
 namespace {
@@ -225,7 +226,7 @@ void on_knob_update(uintptr_t ctx, uintptr_t knob) {
 
 // --- God mode ---------------------------------------------------------------------------------------------
 // The last hit on the player (events.h, PlayerHit). Written on the game's thread.
-std::atomic<DWORD> g_hit_at{0};  // GetTickCount when it came (0: none since the game started)
+std::atomic<DWORD> g_hit_at{0};  // when it came (a moment, stamp.h; 0: none since the game started)
 std::atomic<int> g_hit_damage{-1}, g_hit_hp{-1};
 std::atomic<bool> g_hit_cut{false};
 std::atomic<long> g_hits_cut{0};
@@ -247,7 +248,7 @@ bool on_player_check(uintptr_t ctx, uintptr_t survivor, uintptr_t info) {
       g_hit_damage.store(damage, std::memory_order_relaxed);
       g_hit_hp.store(hp, std::memory_order_relaxed);
       g_hit_cut.store(was >= 0, std::memory_order_relaxed);
-      g_hit_at.store(GetTickCount() | 1, std::memory_order_relaxed);
+      g_hit_at.store(stamp::now(), std::memory_order_release);
     }
     if (was >= 0) {
       g_hits_cut.fetch_add(1, std::memory_order_relaxed);
@@ -288,11 +289,11 @@ HeldOff g_held_off[kHookCount];
 bool hold_off(Hook h, uintptr_t ctx, bool would, const char* what) {
   if (!would || !on(cheats::kGodMode) || call::exception_pending(ctx)) return would;
   HeldOff& ho = g_held_off[h];
-  const DWORD now = GetTickCount() | 1, at = ho.logged_at.load(std::memory_order_relaxed);
-  if (at && now - at < 60000) {
+  // The conditions are asked on the game's threads: the moment is loaded before the clock is read (stamp.h).
+  if (stamp::within(ho.logged_at.load(std::memory_order_acquire), 60000)) {
     ho.since.fetch_add(1, std::memory_order_relaxed);
   } else {
-    ho.logged_at.store(now, std::memory_order_relaxed);
+    ho.logged_at.store(stamp::now(), std::memory_order_release);
     const long more = ho.since.exchange(0, std::memory_order_relaxed);
     if (more > 0) logf("god mode: %s - held off (and %ld more time(s) since the last line)", what, more);
     else logf("god mode: %s - held off", what);
@@ -773,10 +774,10 @@ bool ready(cheats::Kind k) {
 }
 
 bool last_player_hit(PlayerHit* out) {
-  const DWORD at = g_hit_at.load(std::memory_order_relaxed);
+  const DWORD at = g_hit_at.load(std::memory_order_acquire);
   out->cuts = g_hits_cut.load(std::memory_order_relaxed);
   if (!at) return false;
-  out->ago_ms = GetTickCount() - at;
+  out->ago_ms = stamp::age(at);
   out->damage = g_hit_damage.load(std::memory_order_relaxed);
   out->hp = g_hit_hp.load(std::memory_order_relaxed);
   out->cut = g_hit_cut.load(std::memory_order_relaxed);

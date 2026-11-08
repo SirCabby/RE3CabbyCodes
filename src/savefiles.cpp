@@ -16,6 +16,7 @@
 #include "proxy.h"
 #include "re.h"
 #include "savefiles_rules.h"
+#include "stamp.h"
 #include "switch_eval.h"
 
 namespace re3cc::savefiles {
@@ -160,7 +161,7 @@ struct Rows {
   int first_slot = -1;
   bool consistent = false;  // laid out as the game's code says, every entry a detail of its own slot
   Row row[kMaxRows];
-  DWORD taken = 0;  // when it was read (GetTickCount)
+  DWORD taken = 0;  // when it was read (a moment, stamp.h)
 };
 Rows g_rows;  // the list as last read (the hook writes it, under g_cs)
 
@@ -181,17 +182,15 @@ int g_nq = 0;
 // the main game's list with no load or save of the game's under way, last seen up
 // through a save of the game's own (the save screen: the panel waits), and last
 // seen open with its list read (a change can be asked for - the list is null
-// while the game reads it again).
+// while the game reads it again). Moments (stamp.h): each is loaded before the
+// clock is read.
 std::atomic<DWORD> g_seen{0}, g_shown{0}, g_open{0}, g_held{0}, g_input{0};
 std::atomic<int> g_shown_screen{-1};
 
-bool recent(const std::atomic<DWORD>& at, DWORD now) {
-  const DWORD t = at.load(std::memory_order_relaxed);
-  return t && now - t < 400;
-}
-bool screen_seen() { return recent(g_seen, GetTickCount()); }  // it has frames: it is not closed
-bool screen_open() { return screen_seen() && recent(g_open, GetTickCount()); }
-bool list_ready() { return screen_seen() && recent(g_input, GetTickCount()); }
+bool recent(const std::atomic<DWORD>& at) { return stamp::within(at.load(std::memory_order_acquire), 400); }
+bool screen_seen() { return recent(g_seen); }  // it has frames: it is not closed
+bool screen_open() { return screen_seen() && recent(g_open); }
+bool list_ready() { return screen_seen() && recent(g_input); }
 
 // The game's own saves and loads while a change of the panel's is under way
 // (g_watch): counted by the screens' hook - the screen's own IsSaved, IsLoaded,
@@ -203,7 +202,7 @@ std::atomic<bool> g_watch{false}, g_copying{false};
 
 // A refresh the tick asked for, carried out by the hook; the user it is for.
 std::atomic<bool> g_refresh_want{false};
-std::atomic<DWORD> g_refreshed{0};  // when the hook made it
+std::atomic<DWORD> g_refreshed{0};  // when the hook made it (a moment, stamp.h)
 std::atomic<int> g_refresh_user{-1};
 std::atomic<bool> g_refresh_broken{false};  // a refresh call left an exception, or was not there: no more this session
 // The hook's own: the list it last read, and a read it owes (after a refresh).
@@ -522,7 +521,7 @@ void snapshot(uintptr_t list, uintptr_t texts) {
     if (!read_row(re::list_ref(l, i), have_texts ? re::list_ref(tl, i) : 0, C.first + i, &rows->row[i]) && odd < 0)
       odd = i;
   rows->consistent = odd < 0;
-  rows->taken = GetTickCount() | 1;
+  rows->taken = stamp::now();
   if (odd >= 0 && !g_odd_logged.exchange(true))
     logf("save files: the game's list is not laid out as its code says (%d rows, the code: %d from slot %d; row %d does "
          "not fit) - no change goes by it",
@@ -580,7 +579,7 @@ void refresh(uintptr_t ctx, uintptr_t screen) {
     return;
   }
   g_refresh_want = false;
-  g_refreshed = GetTickCount() | 1;
+  g_refreshed = stamp::now();
   g_snap_want = true;
   if (C.refresh)
     logf("save files: the game's list is being read again (SaveService.updateSaveFileDetailTbl(User%d), the screen's "
@@ -1237,7 +1236,7 @@ void screen_frame(uintptr_t ctx, uintptr_t screen) {
   const int kind = re::is_a(screen, Scr.load) ? kLoadGame : Scr.save_ok && re::is_a(screen, Scr.save) ? kSaveGame : -1;
   if (kind < 0) return;
   const bool code = code_ok();
-  const DWORD now = GetTickCount() | 1;
+  const DWORD now = stamp::now();
   const DWORD last = g_seen.exchange(now);
   int32_t mode = -1;
   uint8_t loaded = 0, saved = 0, keep = 0;
@@ -1281,7 +1280,7 @@ void screen_frame(uintptr_t ctx, uintptr_t screen) {
 }
 
 int screen_shown() {
-  return screen_seen() && recent(g_shown, GetTickCount()) ? g_shown_screen.load(std::memory_order_relaxed) : -1;
+  return screen_seen() && recent(g_shown) ? g_shown_screen.load(std::memory_order_relaxed) : -1;
 }
 
 View view() {
@@ -1290,7 +1289,7 @@ View view() {
   if (!g_cs_ready) return v;
   const bool open = screen_open() && list_ready();
   v.screen = screen_shown();
-  v.held = v.screen == kSaveGame && recent(g_held, GetTickCount());
+  v.held = v.screen == kSaveGame && recent(g_held);
   v.copy_ok = St.ok;
   v.busy = g_busy.load();
   EnterCriticalSection(&g_cs);

@@ -16,7 +16,7 @@ adoption of DXGI objects, the save service, why each design is the way it is - i
 `../RE2CabbyCodes/CLAUDE.md`'s: RE3 runs the same engine code, and this repo's sources are that repo's,
 ported. Dated incidents in the code's comments (player reports, crashes, 1.0.x releases) happened there.
 
-## Status (2026-10-22)
+## Status (2026-11-05)
 
 Built and checked offline (everything below was established from `re3.exe` and the game's archives on
 disk: the type database, the code, the user data (RSZ) and the text; `tests/test_discover.cpp` runs the
@@ -86,7 +86,11 @@ the points that build leaves reachable - God mode in the player's vtable and One
 Think, RE2CabbyCodes' approved counterparts, and the final form's pustules at their own frame (approved
 that day). Built and checked offline against the branch's files - the user switched this machine's install
 to the branch that day (20:51), and the RT build's `re3.exe` and Steam DLL were kept aside for the tests -,
-not yet run in game. The game on this machine is on the beta since, the mod installed there.
+not yet run in game. The game on this machine is on the beta since, the mod installed there. Reported
+2026-11-05 (a player's report, passed on by the user: "the records screen is flickering"; the user: "We've had
+this issue with other RE mods, apply the same fix"): RE2CabbyCodes' and RE4CabbyCodes' bug - the screens' hooks
+note a moment with bit 0 set, and the tick aged it on the bare clock, a millisecond behind it - fixed as they
+fixed it (`src/stamp.h`; The screens' moments below). Built and checked offline, not yet run in game.
 
 ## Build, tools, tests
 
@@ -163,7 +167,11 @@ decoded by hand), `test_savefiles` with the beta's own checks (its native texts,
 save screen), `test_discover` 0 names missing on both, `test_app` 19 and `test_proxy` 27 checks on each
 exe (with each build's Steam DLL and DARK SOULS REMASTERED's; RE4's newer DLL hangs Wine's loader, left out),
 `test_load` and `test_adopt` with the beta's Steam DLL as the original, `test_lethal` with the after-damage
-rule and the pustules' sliver; the rest unchanged.
+rule and the pustules' sliver; the rest unchanged. On 2026-11-05 (the screens' moments; the beta's exe and
+Steam DLL only - the RT build's are not on disk, and nothing changed is build-specific; a null-graphics
+prefix): `test_savefiles` passes with the moments' checks (44 709 040 reads of a moment another thread notes
+all the while, 0 missed; the bare clock read first missed 16 329 146), `test_discover` 0 names missing,
+`test_app` 20 checks, `test_load` passes.
 
 ## ⛔ Rules
 
@@ -958,6 +966,44 @@ caught an access violation on the main thread at exe+0x2C9DE88 - a release readi
 after it was torn down, in the CRT's exit path (ucrtbase on the stack) - the game shutting down; not looked
 into further.
 
+## The screens' moments (2026-11-05)
+
+Reported: "the records screen is flickering". The records screen's hook (`RecordBehavior.update`, on a game
+thread) noted when it last ran as `GetTickCount() | 1` (0 is "never"), and the tick aged it on the **bare**
+clock: `now - seen < 400`, the clock read first. GetTickCount() holds a value for up to 16 ms (15.6 on Windows;
+under Wine while its server is idle). A moment noted while it held an even value is a millisecond *ahead* of
+it: an age of -1, unsigned 49 days. So in every tick that read the clock in the same 16 ms as the screen's last
+frame, at an even value, the records screen read as closed. By the odds that is about a quarter of the frames at
+120 a second, more above. In those frames:
+- the snapshot's `records_screen` went false, and the panel drew the cheats on the pause menu, and nothing at
+  the title's Bonus menu;
+- the confirmation of Complete all was forgotten (`g_records_ask_all`, reset as the screen "changes");
+- on Windows, the cursor was shown and hidden with the panel.
+
+The save lists' hook had the same bug (the Load Game and the save screens' `g_seen`, `g_shown`, `g_open`,
+`g_held`, `g_input`), with its dialogs forgotten (`forget_save_dialogs`). RE4CabbyCodes found it first
+(2026-10-23, its save files window) and RE2CabbyCodes on 2026-11-02 (its records window). `src/stamp.h` is
+theirs:
+- moments are `stamp::now()`, and are aged on a clock with bit 0 set too (`stamp::within(at, ms)`,
+  `stamp::age(at)`);
+- the moment is loaded before the clock is read, so a moment another thread notes is never from a later
+  millisecond.
+
+Every moment with bit 0 set goes through it:
+- the records screen's seen and input;
+- the save screens' five, their rows' and refresh's times;
+- God mode's last hit (`events::last_player_hit`'s age in the game over line; it could say "came 4294967.3 s
+  before");
+- the held-off lines' minute (`hold_off`, asked on the game's threads);
+- the results screen's second (`s_results_at`, the tick's own: aged -1, the clear's line could be logged a
+  frame into RESULT, not a second in).
+
+The other timers are bare clocks against bare clocks. `tests/test_savefiles.cpp` checks it, with a thread noting
+moments all the while against another reading them (Build, tools, tests). `show_cursor` (Windows: under Wine the
+panel draws its own) also counts the times it finds the cursor hidden again while the panel is up - the game's
+doing. It logs them as the panel goes (`pointer: the cursor was hidden again N time(s) while the panel was up`),
+as RE2CabbyCodes' does, in case the game, not the panel, ever flickers it.
+
 ## In-game checks (the first sessions)
 
 1. The log: `re: ... ready`, `game: discovery done (0 name(s) missing)`, `records: discovery (0 ...)
@@ -1079,3 +1125,15 @@ into further.
      - The save files: rows with their texts, a Delete and a Copy, each in the game's list at once (the
        field-write refresh).
      - The records panel; the difficulty switch; a save and a load.
+22. The records window steady (The screens' moments; at the monitor's full refresh rate - 120 Hz and up showed
+   it most). Beside the records screen, from the title's Bonus menu above all, and the pause menu's:
+   - the window stays put, and the cheats never show in its place;
+   - a click lands where it is made (a record's switch, the title bar dragged, Complete all and its
+     confirmation);
+   - the log has one `records: the records screen is up` per opening and one `is closed` per closing, never a
+     run of them.
+
+   The same beside the Load Game screen and a typewriter's save screen: one `save files: ... is up` and one
+   `is closed` each, and the Delete and Copy dialogs stay up. On Windows, one `pointer: the cursor is shown
+   while the panel is up` per opening. A `pointer: the cursor was hidden again N time(s)` line as the panel
+   goes means the game hid the cursor under the panel.

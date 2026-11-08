@@ -12,6 +12,7 @@
 #include "game.h"
 #include "log.h"
 #include "savefiles.h"
+#include "stamp.h"
 
 namespace re3cc::cheats {
 namespace {
@@ -547,15 +548,15 @@ void tick(int state, bool in_game, bool paused) {
   // What the clear recorded - the results screen's figures, which ResultFlow's
   // setClearedGame makes on the screen's first frame - logged once it has been up
   // a moment.
-  static DWORD s_results_at = 0;  // when the results screen came up (0: it is not)
+  static DWORD s_results_at = 0;  // when the results screen came up (a moment, stamp.h; 0: it is not)
   static bool s_results_logged = false;
   game::ClearRecord rec;
   if (!game::results_screen_state_is(state)) {
     s_results_at = 0;
     s_results_logged = false;
   } else if (!s_results_at) {
-    s_results_at = GetTickCount() | 1;
-  } else if (!s_results_logged && GetTickCount() - s_results_at >= 1000 && game::clear_record(&rec)) {
+    s_results_at = stamp::now();
+  } else if (!s_results_logged && stamp::age(s_results_at) >= 1000 && game::clear_record(&rec)) {
     s_results_logged = true;
     const unsigned long long t = rec.time_us / 1000000;
     logf("the clear: %s, clear time %llu:%02llu:%02llu%s, %d save(s), %d death(s) - rank %s",
