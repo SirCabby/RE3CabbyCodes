@@ -119,6 +119,7 @@ x86_64-w64-mingw32-g++ -std=c++20 -O2 -static tests/test_savefiles.cpp -o tests/
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_re.cpp src/re.cpp src/log.cpp src/mem.cpp -o tests/build/test_re.exe   # + re3.exe
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_proxy.cpp src/proxy.cpp src/log.cpp src/mem.cpp -o tests/build/test_proxy.exe   # + re3.exe + steam_api64.dll [others]
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_mem.cpp src/mem.cpp -o tests/build/test_mem.exe
+x86_64-w64-mingw32-g++ -std=c++20 -O2 -Wall -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_crash.cpp src/crash.cpp src/mem.cpp -o tests/build/test_crash.exe   # the crash logger (Windows); run it, and with `c2`
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_config.cpp src/config.cpp src/log.cpp -o tests/build/test_config.exe   # the ini's write-back
 bash -c 'x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -Icontrib/imgui -static tests/test_app.cpp $(ls build/*.o | grep -v dllmain.o) $(find build/imgui -name "*.o") -luser32 -lshell32 -lole32 -lgdi32 -ldwmapi -ldxguid -luuid -ldinput8 -o tests/build/test_app.exe'   # + re3.exe: the frame hook beside another tool's (REFramework)
 x86_64-w64-mingw32-g++ -std=c++20 -O2 -DWIN32_LEAN_AND_MEAN -DNOMINMAX -static tests/test_input.cpp src/input.cpp src/log.cpp src/mem.cpp src/config.cpp -luser32 -o tests/build/test_input.exe   # the input guard (a Graphics = null prefix)
@@ -457,6 +458,28 @@ that code, renamed. Checked for RE3:
     the system code page keeps the original Steam DLL from loading (under Proton too).
   - A swap chain whose buffer count or format changes (HDR switched on in game) stops the DX12 panel until a
     restart (logged). Under HDR its colours are not converted.
+- **The crash logger** (`crash.cpp`, RE2CabbyCodes' again; changed 2026-11-10 in all three RE Engine mods, after
+  reading a crash report from a user of the RE4 (2005) mod, RE4OGCabbyCodes, which has the same logger). Ours
+  stays on top of the filter the game sets through its import and, once a second, of one set over it some other
+  way, passing a crash on to it. Two faults were found there, both fixed:
+  - a filter set over ours that chains to the one it replaced (ours) made the two pass a crash round until the
+    stack ran out (the old file, in `test_crash`: 4,777 dumps, then the process gone);
+  - with `SetUnhandledExceptionFilter` made to do nothing (a ret over its first bytes, as some crash handlers do
+    to keep the slot - re4_tweaks does it to RE4 (2005) with a CrashDumps folder), each reassert took whatever
+    rax held for the previous filter and logged "ours is back on top" every second.
+
+  Now:
+  - an exception ours is passing on, handed back to ours on the same thread, stops there (one line);
+  - a new one raised inside the filter ours passed the last one on to is passed on too, up to three deep;
+  - the same exception given to ours again is one line, not a second dump;
+  - a "previous filter" that is not executable code is never chained to;
+  - the API made inert (found past the jumps in front of it: a `ret`, a `ret imm16`, or `xor eax,eax`/`xor rax,rax`
+    and a ret) is said once and left alone - that handler then takes every crash, and this log has none;
+  - a filter that keeps putting itself back over ours is logged once.
+
+  A dump has every register, the top 0xC0 bytes of the stack raw, the module-named return addresses and the
+  filter it is passed on to. `tests/test_crash.cpp` (run, and with `c2`) checks this offline only. None of it has
+  been seen at a real crash, beside such a handler, or on Windows.
 
 ## The reverse-engineering record (build 24468913)
 
